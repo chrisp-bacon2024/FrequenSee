@@ -1,0 +1,20 @@
+{
+  "name": "audio-visualizer",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:spl": "tsx test/spl-over-time.test.ts",
+    "test:leq": "tsx test/leq.test.ts",
+    "test:leq:two-level": "tsx test/leq-two-level.test.ts",
+    "generate:test-wavs": "tsx test/generate-test-wavs.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.3",
+    "wav-decoder": "^1.3.0"
+  }
+}

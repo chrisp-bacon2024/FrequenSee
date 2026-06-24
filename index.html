@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<!-- SPL Visualizer: upload a WAV and view SPL / Leq graphs. See README.md. -->
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <title>SPL Visualizer</title>
+        <link rel="stylesheet" href="/src/style.css" />
+    </head>
+    <body>
+        <div class="app">
+            <header class="header">
+                <div>
+                    <h1>SPL Visualizer</h1>
+                    <p class="subtitle">Sound pressure level over time</p>
+                </div>
+                <div class="controls">
+                    <label class="control">
+                        <span>WAV file</span>
+                        <input type="file" id="file-input" accept="audio/wav,audio/*" />
+                    </label>
+                    <label class="control">
+                        <span>Graph</span>
+                        <select id="graph-select" disabled></select>
+                    </label>
+                </div>
+            </header>
+
+            <section class="meta" id="meta"></section>
+
+            <section class="chart-panel">
+                <canvas id="chart" width="960" height="420"></canvas>
+                <p class="loading" id="loading" hidden>Analyzing audio…</p>
+            </section>
+        </div>
+        <script type="module" src="/src/main.ts"></script>
+    </body>
+</html>
