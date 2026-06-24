@@ -1,96 +1,118 @@
 /**
  * SPL Visualizer — browser application entry point.
  *
- * Loads a WAV (default or user upload), precomputes all SPL and Leq traces,
- * and renders the selected graph from the dropdown. See project README.md.
+ * Loads a WAV (default or user upload), precomputes SPL and Leq traces,
+ * and renders selected series on a combined graph. See project README.md.
  *
  * @module main
  */
 
 import Leq from "../audio analysis/Leq";
 import SPL from "../audio analysis/SPL";
-import { TimeWeighting, Weighting } from "../audio analysis/dsp";
+import { Weighting } from "../audio analysis/dsp";
 import Wav from "../audio analysis/wav";
-import { ChartPoint, SplChart } from "./chart";
+import { ChartPoint, ChartSeries, SplChart } from "./chart";
 
-type SplGraphKey = `${Weighting}_${TimeWeighting}`;
-type LeqGraphKey = `LEQ_${Weighting}`;
-type GraphKey = SplGraphKey | LeqGraphKey;
+type TraceKey = "SPLZ" | "SPLA" | "SPLC" | "LZEQ" | "LAEQ" | "LCEQ";
 
-type GraphConfig = {
-    key: GraphKey;
+type TraceConfig = {
+    key: TraceKey;
     label: string;
+    color: string;
     kind: "SPL" | "LEQ";
     weighting: Weighting;
-    speed?: TimeWeighting;
-    yLabel: string;
+    dashed?: boolean;
+    defaultOn: boolean;
 };
 
-const SPL_GRAPHS: GraphConfig[] = [
-    { key: "Z_FAST", label: "SPL — Z-weighted Fast (LZF)", kind: "SPL", weighting: "Z", speed: "FAST", yLabel: "SPL (dB)" },
-    { key: "Z_SLOW", label: "SPL — Z-weighted Slow (LZS)", kind: "SPL", weighting: "Z", speed: "SLOW", yLabel: "SPL (dB)" },
-    { key: "Z_INST", label: "SPL — Z-weighted Instantaneous", kind: "SPL", weighting: "Z", speed: "INST", yLabel: "SPL (dB)" },
-    { key: "A_FAST", label: "SPL — A-weighted Fast (LAF)", kind: "SPL", weighting: "A", speed: "FAST", yLabel: "SPL (dB)" },
-    { key: "A_SLOW", label: "SPL — A-weighted Slow (LAS)", kind: "SPL", weighting: "A", speed: "SLOW", yLabel: "SPL (dB)" },
-    { key: "A_INST", label: "SPL — A-weighted Instantaneous", kind: "SPL", weighting: "A", speed: "INST", yLabel: "SPL (dB)" },
-    { key: "C_FAST", label: "SPL — C-weighted Fast (LCF)", kind: "SPL", weighting: "C", speed: "FAST", yLabel: "SPL (dB)" },
-    { key: "C_SLOW", label: "SPL — C-weighted Slow (LCS)", kind: "SPL", weighting: "C", speed: "SLOW", yLabel: "SPL (dB)" },
-    { key: "C_INST", label: "SPL — C-weighted Instantaneous", kind: "SPL", weighting: "C", speed: "INST", yLabel: "SPL (dB)" },
+const TRACES: TraceConfig[] = [
+    { key: "SPLZ", label: "SPLZ", color: "#5b9cff", kind: "SPL", weighting: "Z", defaultOn: true },
+    { key: "SPLA", label: "SPLA", color: "#ff6b8a", kind: "SPL", weighting: "A", defaultOn: false },
+    { key: "SPLC", label: "SPLC", color: "#ffd166", kind: "SPL", weighting: "C", defaultOn: false },
+    { key: "LZEQ", label: "LZEQ", color: "#7bdcb5", kind: "LEQ", weighting: "Z", dashed: true, defaultOn: false },
+    { key: "LAEQ", label: "LAEQ", color: "#c792ea", kind: "LEQ", weighting: "A", dashed: true, defaultOn: false },
+    { key: "LCEQ", label: "LCEQ", color: "#f78c6c", kind: "LEQ", weighting: "C", dashed: true, defaultOn: false },
 ];
-
-const LEQ_GRAPHS: GraphConfig[] = [
-    { key: "LEQ_Z", label: "Leq — Z-weighted (LZeq)", kind: "LEQ", weighting: "Z", yLabel: "Leq (dB)" },
-    { key: "LEQ_A", label: "Leq — A-weighted (LAeq)", kind: "LEQ", weighting: "A", yLabel: "Leq (dB)" },
-    { key: "LEQ_C", label: "Leq — C-weighted (LCeq)", kind: "LEQ", weighting: "C", yLabel: "Leq (dB)" },
-];
-
-const GRAPHS: GraphConfig[] = [...SPL_GRAPHS, ...LEQ_GRAPHS];
 
 const STEP_MS = 100;
 const DEFAULT_WAV = "/test_1kHz.wav";
 
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
-const graphSelect = document.getElementById("graph-select") as HTMLSelectElement;
+const seriesToggles = document.getElementById("series-toggles") as HTMLDivElement;
 const meta = document.getElementById("meta") as HTMLElement;
 const loading = document.getElementById("loading") as HTMLParagraphElement;
 const chartCanvas = document.getElementById("chart") as HTMLCanvasElement;
 
 const chart = new SplChart(chartCanvas);
 const audioContext = new AudioContext();
-const traces = new Map<GraphKey, ChartPoint[]>();
+const traceData = new Map<TraceKey, ChartPoint[]>();
+const enabledTraces = new Set<TraceKey>(
+    TRACES.filter((trace) => trace.defaultOn).map((trace) => trace.key)
+);
 
 let currentFileName = "";
 
-function populateGraphSelect(): void {
-    graphSelect.innerHTML = "";
+function populateSeriesToggles(): void {
+    seriesToggles.innerHTML = "";
 
-    const splGroup = document.createElement("optgroup");
-    splGroup.label = "SPL";
-    for (const graph of SPL_GRAPHS) {
-        const option = document.createElement("option");
-        option.value = graph.key;
-        option.textContent = graph.label;
-        splGroup.appendChild(option);
+    for (const trace of TRACES) {
+        const label = document.createElement("label");
+        label.className = "series-toggle";
+        label.dataset.trace = trace.key;
+        label.style.setProperty("--series-color", trace.color);
+        if (enabledTraces.has(trace.key)) {
+            label.classList.add("is-active");
+        }
+
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.name = "series";
+        input.value = trace.key;
+        input.checked = enabledTraces.has(trace.key);
+        input.disabled = traceData.size === 0;
+
+        const swatch = document.createElement("span");
+        swatch.className = "series-swatch";
+        swatch.style.setProperty("--series-color", trace.color);
+        if (trace.dashed) swatch.classList.add("is-dashed");
+
+        const text = document.createElement("span");
+        text.className = "series-label";
+        text.textContent = trace.label;
+
+        const kind = document.createElement("span");
+        kind.className = "series-kind";
+        kind.textContent = trace.kind;
+
+        label.append(input, swatch, text, kind);
+
+        input.addEventListener("change", () => {
+            if (!input.checked && enabledTraces.size === 1) {
+                input.checked = true;
+                return;
+            }
+
+            if (input.checked) {
+                enabledTraces.add(trace.key);
+                label.classList.add("is-active");
+            } else {
+                enabledTraces.delete(trace.key);
+                label.classList.remove("is-active");
+            }
+            renderGraph();
+        });
+
+        seriesToggles.appendChild(label);
     }
-    graphSelect.appendChild(splGroup);
-
-    const leqGroup = document.createElement("optgroup");
-    leqGroup.label = "Leq";
-    for (const graph of LEQ_GRAPHS) {
-        const option = document.createElement("option");
-        option.value = graph.key;
-        option.textContent = graph.label;
-        leqGroup.appendChild(option);
-    }
-    graphSelect.appendChild(leqGroup);
-
-    graphSelect.disabled = false;
 }
 
 function setLoading(isLoading: boolean): void {
     loading.hidden = !isLoading;
-    graphSelect.disabled = isLoading || traces.size === 0;
     fileInput.disabled = isLoading;
+
+    seriesToggles.querySelectorAll("input").forEach((input) => {
+        (input as HTMLInputElement).disabled = isLoading || traceData.size === 0;
+    });
 }
 
 function renderMeta(wav: Wav, spl: SPL, leq: Leq): void {
@@ -104,22 +126,32 @@ function renderMeta(wav: Wav, spl: SPL, leq: Leq): void {
     `;
 }
 
-function renderSelectedGraph(): void {
-    const key = graphSelect.value as GraphKey;
-    const config = GRAPHS.find((graph) => graph.key === key);
-    const points = traces.get(key);
+function renderGraph(): void {
+    const series: ChartSeries[] = [];
 
-    if (!config || !points) return;
+    for (const trace of TRACES) {
+        if (!enabledTraces.has(trace.key)) continue;
+        const points = traceData.get(trace.key);
+        if (!points) continue;
 
-    chart.draw(points, {
-        title: config.label,
-        yLabel: config.yLabel,
+        series.push({
+            label: trace.label,
+            color: trace.color,
+            points,
+            dashed: trace.dashed,
+        });
+    }
+
+    chart.draw({
+        title: "Sound Level Over Time",
+        yLabel: "Level (dB)",
+        series,
     });
 }
 
 async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
     setLoading(true);
-    traces.clear();
+    traceData.clear();
     currentFileName = fileName;
 
     const spl = new SPL(wav);
@@ -131,30 +163,31 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
 
     renderMeta(wav, spl, leq);
 
-    for (const graph of SPL_GRAPHS) {
-        traces.set(
-            graph.key,
-            spl.measureOverTime({
-                weighting: graph.weighting,
-                speed: graph.speed!,
-                mode: "SPL",
-                stepMs: STEP_MS,
-            })
-        );
+    for (const trace of TRACES) {
+        if (trace.kind === "SPL") {
+            traceData.set(
+                trace.key,
+                spl.measureOverTime({
+                    weighting: trace.weighting,
+                    speed: "FAST",
+                    mode: "SPL",
+                    stepMs: STEP_MS,
+                })
+            );
+        } else {
+            traceData.set(
+                trace.key,
+                leq.measureOverTime({
+                    weighting: trace.weighting,
+                    speed: "INST",
+                    stepMs: STEP_MS,
+                })
+            );
+        }
     }
 
-    for (const graph of LEQ_GRAPHS) {
-        traces.set(
-            graph.key,
-            leq.measureOverTime({
-                weighting: graph.weighting,
-                speed: "INST",
-                stepMs: STEP_MS,
-            })
-        );
-    }
-
-    renderSelectedGraph();
+    populateSeriesToggles();
+    renderGraph();
     setLoading(false);
 }
 
@@ -170,9 +203,7 @@ async function loadDefault(): Promise<void> {
     await analyzeWav(wav, "test_1kHz.wav (default)");
 }
 
-populateGraphSelect();
-
-graphSelect.addEventListener("change", renderSelectedGraph);
+populateSeriesToggles();
 
 fileInput.addEventListener("change", () => {
     const file = fileInput.files?.[0];
@@ -181,7 +212,7 @@ fileInput.addEventListener("change", () => {
     }
 });
 
-window.addEventListener("resize", renderSelectedGraph);
+window.addEventListener("resize", renderGraph);
 
 void loadDefault().catch((error: unknown) => {
     setLoading(false);

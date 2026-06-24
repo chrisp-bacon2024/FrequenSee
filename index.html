@@ -19,16 +19,16 @@
                         <span>WAV file</span>
                         <input type="file" id="file-input" accept="audio/wav,audio/*" />
                     </label>
-                    <label class="control">
-                        <span>Graph</span>
-                        <select id="graph-select" disabled></select>
-                    </label>
                 </div>
             </header>
 
             <section class="meta" id="meta"></section>
 
             <section class="chart-panel">
+                <div class="series-bar">
+                    <span class="series-bar-label">Traces</span>
+                    <div class="series-toggles" id="series-toggles"></div>
+                </div>
                 <canvas id="chart" width="960" height="420"></canvas>
                 <p class="loading" id="loading" hidden>Analyzing audio…</p>
             </section>

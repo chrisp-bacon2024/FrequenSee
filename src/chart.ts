@@ -2,7 +2,7 @@
  * Canvas line chart for SPL / Leq vs time.
  *
  * Renders a responsive dark-theme plot with grid lines, axis labels,
- * and a highlighted final point. Used by the web app in `main.ts`.
+ * and support for multiple overlaid series. Used by the web app in `main.ts`.
  *
  * @module chart
  */
@@ -13,17 +13,25 @@ export type ChartPoint = {
     levelDb: number;
 };
 
+export type ChartSeries = {
+    label: string;
+    color: string;
+    points: ChartPoint[];
+    dashed?: boolean;
+};
+
 export type SplChartOptions = {
     title: string;
     yLabel?: string;
+    series: ChartSeries[];
 };
 
 export class SplChart {
     constructor(private canvas: HTMLCanvasElement) {}
 
-    draw(points: ChartPoint[], options: SplChartOptions): void {
+    draw(options: SplChartOptions): void {
         const ctx = this.canvas.getContext("2d");
-        if (!ctx || points.length === 0) return;
+        if (!ctx || options.series.length === 0) return;
 
         const dpr = window.devicePixelRatio || 1;
         const cssWidth = this.canvas.clientWidth || this.canvas.width;
@@ -39,23 +47,24 @@ export class SplChart {
         const plotW = width - pad.left - pad.right;
         const plotH = height - pad.top - pad.bottom;
 
-        const finiteLevels = points
-            .map((point) => point.levelDb)
-            .filter((value) => Number.isFinite(value));
+        const allLevels = options.series.flatMap((series) =>
+            series.points.map((point) => point.levelDb).filter(Number.isFinite)
+        );
 
-        if (finiteLevels.length === 0) return;
+        if (allLevels.length === 0) return;
 
-        let yMin = Math.min(...finiteLevels);
-        let yMax = Math.max(...finiteLevels);
+        let yMin = Math.min(...allLevels);
+        let yMax = Math.max(...allLevels);
         const yPad = Math.max(2, (yMax - yMin) * 0.08 || 2);
         yMin -= yPad;
         yMax += yPad;
 
-        const xMin = 0;
-        const xMax = points[points.length - 1].timeSec || 1;
+        const xMax = Math.max(
+            ...options.series.map((series) => series.points[series.points.length - 1]?.timeSec ?? 0),
+            1
+        );
 
-        const xScale = (timeSec: number) =>
-            pad.left + ((timeSec - xMin) / (xMax - xMin)) * plotW;
+        const xScale = (timeSec: number) => pad.left + (timeSec / xMax) * plotW;
         const yScale = (levelDb: number) =>
             pad.top + (1 - (levelDb - yMin) / (yMax - yMin)) * plotH;
 
@@ -66,6 +75,7 @@ export class SplChart {
 
         ctx.fillStyle = "#e8ecf4";
         ctx.font = "600 15px Segoe UI, system-ui, sans-serif";
+        ctx.textAlign = "left";
         ctx.fillText(options.title, pad.left, 24);
 
         ctx.strokeStyle = "#252b3a";
@@ -88,7 +98,7 @@ export class SplChart {
 
         const xTicks = 8;
         for (let i = 0; i <= xTicks; i++) {
-            const value = xMin + ((xMax - xMin) * i) / xTicks;
+            const value = (xMax * i) / xTicks;
             const x = xScale(value);
             ctx.beginPath();
             ctx.moveTo(x, pad.top);
@@ -108,32 +118,55 @@ export class SplChart {
         ctx.save();
         ctx.translate(16, pad.top + plotH / 2);
         ctx.rotate(-Math.PI / 2);
-        ctx.fillText(options.yLabel ?? "SPL (dB)", 0, 0);
+        ctx.fillText(options.yLabel ?? "Level (dB)", 0, 0);
         ctx.restore();
 
+        for (const series of options.series) {
+            this.drawSeries(ctx, series, xScale, yScale);
+        }
+    }
+
+    private drawSeries(
+        ctx: CanvasRenderingContext2D,
+        series: ChartSeries,
+        xScale: (timeSec: number) => number,
+        yScale: (levelDb: number) => number
+    ): void {
         ctx.beginPath();
-        ctx.strokeStyle = "#5b9cff";
+        ctx.strokeStyle = series.color;
         ctx.lineWidth = 2;
         ctx.lineJoin = "round";
         ctx.lineCap = "round";
 
-        points.forEach((point, index) => {
-            if (!Number.isFinite(point.levelDb)) return;
+        if (series.dashed) {
+            ctx.setLineDash([6, 4]);
+        } else {
+            ctx.setLineDash([]);
+        }
+
+        let started = false;
+        for (const point of series.points) {
+            if (!Number.isFinite(point.levelDb)) continue;
             const x = xScale(point.timeSec);
             const y = yScale(point.levelDb);
-            if (index === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        });
+            if (!started) {
+                ctx.moveTo(x, y);
+                started = true;
+            } else {
+                ctx.lineTo(x, y);
+            }
+        }
 
-        ctx.stroke();
+        if (started) ctx.stroke();
+        ctx.setLineDash([]);
 
-        const last = points[points.length - 1];
-        if (Number.isFinite(last.levelDb)) {
+        const last = series.points[series.points.length - 1];
+        if (last && Number.isFinite(last.levelDb)) {
             const x = xScale(last.timeSec);
             const y = yScale(last.levelDb);
-            ctx.fillStyle = "#5b9cff";
+            ctx.fillStyle = series.color;
             ctx.beginPath();
-            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.arc(x, y, 3.5, 0, Math.PI * 2);
             ctx.fill();
         }
     }
