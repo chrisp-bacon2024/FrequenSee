@@ -1,19 +1,22 @@
 /**
  * SPL Visualizer — browser application entry point.
  *
- * Loads a WAV (default or user upload), precomputes SPL and Leq traces,
- * and renders selected series on a combined graph. See project README.md.
+ * Loads a WAV, precomputes SPL/Leq/RTA traces, and supports playback
+ * with synchronized time-series and RTA spectrum views.
  *
  * @module main
  */
 
 import Leq from "../audio analysis/Leq";
+import RTA, { FrequencyBinData } from "../audio analysis/RTA";
 import SPL from "../audio analysis/SPL";
 import { Weighting } from "../audio analysis/dsp";
 import Wav from "../audio analysis/Wav";
 import { ChartPoint, ChartSeries, SplChart } from "./chart";
+import { RtaChart } from "./rtaChart";
 
 type TraceKey = "SPLZ" | "SPLA" | "SPLC" | "LZEQ" | "LAEQ" | "LCEQ";
+type ViewMode = "time" | "rta";
 
 type TraceConfig = {
     key: TraceKey;
@@ -36,21 +39,190 @@ const TRACES: TraceConfig[] = [
 
 const STEP_MS = 100;
 const DEFAULT_WAV = "/test_1kHz.wav";
+const RTA_FFT_SIZE = 2048;
 
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
+const viewSelect = document.getElementById("view-select") as HTMLSelectElement;
+const rtaWeightingControl = document.getElementById("rta-weighting-control") as HTMLLabelElement;
+const rtaWeightingSelect = document.getElementById("rta-weighting-select") as HTMLSelectElement;
+const rtaBandwidthControl = document.getElementById("rta-bandwidth-control") as HTMLLabelElement;
+const rtaBandwidthSelect = document.getElementById("rta-bandwidth-select") as HTMLSelectElement;
 const seriesToggles = document.getElementById("series-toggles") as HTMLDivElement;
+const timeSeriesBar = document.getElementById("time-series-bar") as HTMLDivElement;
 const meta = document.getElementById("meta") as HTMLElement;
 const loading = document.getElementById("loading") as HTMLParagraphElement;
 const chartCanvas = document.getElementById("chart") as HTMLCanvasElement;
+const rtaChartCanvas = document.getElementById("rta-chart") as HTMLCanvasElement;
+const playbackBar = document.getElementById("playback-bar") as HTMLElement;
+const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
+const seekSlider = document.getElementById("seek-slider") as HTMLInputElement;
+const playbackTime = document.getElementById("playback-time") as HTMLSpanElement;
 
 const chart = new SplChart(chartCanvas);
+const rtaChart = new RtaChart(rtaChartCanvas);
 const audioContext = new AudioContext();
+
 const traceData = new Map<TraceKey, ChartPoint[]>();
 const enabledTraces = new Set<TraceKey>(
     TRACES.filter((trace) => trace.defaultOn).map((trace) => trace.key)
 );
 
 let currentFileName = "";
+let currentWav: Wav | null = null;
+let rtaFrames: FrequencyBinData[][] = [];
+let rtaFrameDurationSec = 0;
+let viewMode: ViewMode = "time";
+let rtaWeighting: Weighting = "Z";
+let rtaBandwidth = 1 / 3;
+
+let sourceNode: AudioBufferSourceNode | null = null;
+let playbackContextStart = 0;
+let playbackOffsetSec = 0;
+let isPlaying = false;
+let isSeeking = false;
+let animFrameId = 0;
+
+function formatTime(sec: number): string {
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function frameIndexForTime(timeSec: number): number {
+    if (rtaFrames.length === 0 || !currentWav) return 0;
+    const idx = Math.floor((timeSec * currentWav.sampleRate) / RTA_FFT_SIZE);
+    return Math.max(0, Math.min(rtaFrames.length - 1, idx));
+}
+
+function getPlaybackTimeSec(): number {
+    if (!currentWav) return 0;
+    if (isPlaying) {
+        return Math.min(
+            currentWav.duration,
+            playbackOffsetSec + (audioContext.currentTime - playbackContextStart)
+        );
+    }
+    return playbackOffsetSec;
+}
+
+function stopPlayback(): void {
+    if (sourceNode) {
+        sourceNode.onended = null;
+        try {
+            sourceNode.stop();
+        } catch {
+            /* already stopped */
+        }
+        sourceNode.disconnect();
+        sourceNode = null;
+    }
+    isPlaying = false;
+    playBtn.textContent = "▶";
+    playBtn.setAttribute("aria-label", "Play");
+    cancelAnimationFrame(animFrameId);
+}
+
+function updatePlaybackUi(): void {
+    if (!currentWav) return;
+
+    const t = getPlaybackTimeSec();
+    const duration = currentWav.duration;
+    const ratio = duration > 0 ? t / duration : 0;
+
+    if (!isSeeking) {
+        seekSlider.value = String(Math.round(ratio * 1000));
+    }
+    playbackTime.textContent = `${formatTime(t)} / ${formatTime(duration)}`;
+    renderActiveView(t);
+}
+
+function playbackTick(): void {
+    updatePlaybackUi();
+
+    if (!isPlaying || !currentWav) return;
+
+    if (getPlaybackTimeSec() >= currentWav.duration - 0.02) {
+        playbackOffsetSec = currentWav.duration;
+        stopPlayback();
+        updatePlaybackUi();
+        return;
+    }
+
+    animFrameId = requestAnimationFrame(playbackTick);
+}
+
+async function startPlayback(): Promise<void> {
+    if (!currentWav?.audioBuffer) return;
+
+    if (audioContext.state === "suspended") {
+        await audioContext.resume();
+    }
+
+    stopPlayback();
+
+    sourceNode = audioContext.createBufferSource();
+    sourceNode.buffer = currentWav.audioBuffer;
+    sourceNode.connect(audioContext.destination);
+
+    playbackContextStart = audioContext.currentTime;
+    const startAt = playbackOffsetSec;
+    sourceNode.start(0, startAt);
+
+    sourceNode.onended = () => {
+        if (isPlaying) {
+            playbackOffsetSec = currentWav?.duration ?? 0;
+            stopPlayback();
+            updatePlaybackUi();
+        }
+    };
+
+    isPlaying = true;
+    playBtn.textContent = "⏸";
+    playBtn.setAttribute("aria-label", "Pause");
+    animFrameId = requestAnimationFrame(playbackTick);
+}
+
+function togglePlayback(): void {
+    if (!currentWav?.audioBuffer) return;
+
+    if (isPlaying) {
+        playbackOffsetSec = getPlaybackTimeSec();
+        stopPlayback();
+        updatePlaybackUi();
+        return;
+    }
+
+    if (playbackOffsetSec >= currentWav.duration - 0.02) {
+        playbackOffsetSec = 0;
+    }
+
+    void startPlayback();
+}
+
+function seekTo(ratio: number): void {
+    if (!currentWav) return;
+
+    playbackOffsetSec = ratio * currentWav.duration;
+
+    if (isPlaying) {
+        void startPlayback();
+    } else {
+        updatePlaybackUi();
+    }
+}
+
+function setViewMode(mode: ViewMode): void {
+    viewMode = mode;
+    const isRta = mode === "rta";
+
+    chartCanvas.hidden = isRta;
+    rtaChartCanvas.hidden = !isRta;
+    timeSeriesBar.hidden = isRta;
+    rtaWeightingControl.hidden = !isRta;
+    rtaBandwidthControl.hidden = !isRta;
+
+    updatePlaybackUi();
+}
 
 function populateSeriesToggles(): void {
     seriesToggles.innerHTML = "";
@@ -99,7 +271,7 @@ function populateSeriesToggles(): void {
                 enabledTraces.delete(trace.key);
                 label.classList.remove("is-active");
             }
-            renderGraph();
+            renderActiveView(getPlaybackTimeSec());
         });
 
         seriesToggles.appendChild(label);
@@ -109,13 +281,14 @@ function populateSeriesToggles(): void {
 function setLoading(isLoading: boolean): void {
     loading.hidden = !isLoading;
     fileInput.disabled = isLoading;
+    playBtn.disabled = isLoading || !currentWav?.audioBuffer;
 
     seriesToggles.querySelectorAll("input").forEach((input) => {
         (input as HTMLInputElement).disabled = isLoading || traceData.size === 0;
     });
 }
 
-function renderMeta(wav: Wav, spl: SPL, leq: Leq): void {
+function renderMeta(wav: Wav, spl: SPL, leq: Leq, frameCount: number): void {
     meta.innerHTML = `
         <span><strong>File:</strong> ${currentFileName}</span>
         <span><strong>Duration:</strong> ${wav.duration.toFixed(2)} s</span>
@@ -123,10 +296,11 @@ function renderMeta(wav: Wav, spl: SPL, leq: Leq): void {
         <span><strong>Channels:</strong> ${wav.channelCount}</span>
         <span><strong>Calibration:</strong> ${spl.getCalibrationOffsetDb().toFixed(2)} dB offset</span>
         <span><strong>Leq interval:</strong> ${leq.getSampleDuration()} s</span>
+        <span><strong>RTA frames:</strong> ${frameCount} (${rtaFrameDurationSec.toFixed(3)} s each)</span>
     `;
 }
 
-function renderGraph(): void {
+function renderTimeGraph(playheadSec?: number): void {
     const series: ChartSeries[] = [];
 
     for (const trace of TRACES) {
@@ -146,49 +320,93 @@ function renderGraph(): void {
         title: "Sound Level Over Time",
         yLabel: "Level (dB)",
         series,
+        playheadSec,
     });
+}
+
+function renderRtaGraph(timeSec: number): void {
+    if (rtaFrames.length === 0 || !currentWav) return;
+
+    const frameIndex = frameIndexForTime(timeSec);
+    const frame = rtaFrames[frameIndex];
+
+    rtaChart.draw(frame, {
+        title: "RTA Spectrum",
+        weighting: rtaWeighting,
+        timeSec,
+        durationSec: currentWav.duration,
+    });
+}
+
+function renderActiveView(timeSec?: number): void {
+    const t = timeSec ?? getPlaybackTimeSec();
+
+    if (viewMode === "rta") {
+        renderRtaGraph(t);
+    } else {
+        renderTimeGraph(currentWav ? t : undefined);
+    }
 }
 
 async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
     setLoading(true);
+    stopPlayback();
     traceData.clear();
+    rtaFrames = [];
+    currentWav = wav;
     currentFileName = fileName;
+    playbackOffsetSec = 0;
 
-    const spl = new SPL(wav);
-    spl.calibrate(94, { weighting: "Z", speed: "INST" });
+    try {
+        const spl = new SPL(wav);
+        spl.calibrate(94, { weighting: "Z", speed: "INST" });
 
-    const leq = new Leq(wav);
-    leq.setTotalMeasurementTime(Math.ceil(wav.duration));
-    leq.calibrate(94, { weighting: "Z", speed: "INST" });
+        const leq = new Leq(wav);
+        leq.setTotalMeasurementTime(Math.ceil(wav.duration));
+        leq.calibrate(94, { weighting: "Z", speed: "INST" });
 
-    renderMeta(wav, spl, leq);
+        const rta = new RTA(wav, rtaBandwidth, RTA_FFT_SIZE);
+        rta.calibrate(94, { weighting: "Z", speed: "INST" });
+        rtaFrames = rta.calculate(0, "hann");
+        rtaFrameDurationSec = RTA_FFT_SIZE / wav.sampleRate;
 
-    for (const trace of TRACES) {
-        if (trace.kind === "SPL") {
-            traceData.set(
-                trace.key,
-                spl.measureOverTime({
-                    weighting: trace.weighting,
-                    speed: "FAST",
-                    mode: "SPL",
-                    stepMs: STEP_MS,
-                })
-            );
-        } else {
-            traceData.set(
-                trace.key,
-                leq.measureOverTime({
-                    weighting: trace.weighting,
-                    speed: "INST",
-                    stepMs: STEP_MS,
-                })
-            );
+        renderMeta(wav, spl, leq, rtaFrames.length);
+
+        for (const trace of TRACES) {
+            if (trace.kind === "SPL") {
+                traceData.set(
+                    trace.key,
+                    spl.measureOverTime({
+                        weighting: trace.weighting,
+                        speed: "FAST",
+                        mode: "SPL",
+                        stepMs: STEP_MS,
+                    })
+                );
+            } else {
+                traceData.set(
+                    trace.key,
+                    leq.measureOverTime({
+                        weighting: trace.weighting,
+                        speed: "INST",
+                        stepMs: STEP_MS,
+                    })
+                );
+            }
+
+            // Yield so the browser can paint the loading overlay between heavy traces.
+            await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
-    }
 
-    populateSeriesToggles();
-    renderGraph();
-    setLoading(false);
+        playbackBar.hidden = !wav.audioBuffer;
+        seekSlider.value = "0";
+        playBtn.disabled = !wav.audioBuffer;
+
+        populateSeriesToggles();
+        setViewMode(viewMode);
+    } finally {
+        setLoading(false);
+    }
 }
 
 async function loadFromFile(file: File): Promise<void> {
@@ -204,6 +422,44 @@ async function loadDefault(): Promise<void> {
 }
 
 populateSeriesToggles();
+setViewMode("time");
+
+viewSelect.addEventListener("change", () => {
+    setViewMode(viewSelect.value as ViewMode);
+});
+
+rtaWeightingSelect.addEventListener("change", () => {
+    rtaWeighting = rtaWeightingSelect.value as Weighting;
+    renderActiveView(getPlaybackTimeSec());
+});
+
+rtaBandwidthSelect.addEventListener("change", () => {
+    rtaBandwidth = Number(rtaBandwidthSelect.value);
+    if (currentWav) {
+        void analyzeWav(currentWav, currentFileName);
+    }
+});
+
+playBtn.addEventListener("click", () => {
+    void togglePlayback();
+});
+
+seekSlider.addEventListener("input", () => {
+    isSeeking = true;
+    if (!currentWav) return;
+    const ratio = Number(seekSlider.value) / 1000;
+    playbackTime.textContent = `${formatTime(ratio * currentWav.duration)} / ${formatTime(currentWav.duration)}`;
+    if (viewMode === "rta") {
+        renderRtaGraph(ratio * currentWav.duration);
+    } else {
+        renderTimeGraph(ratio * currentWav.duration);
+    }
+});
+
+seekSlider.addEventListener("change", () => {
+    isSeeking = false;
+    seekTo(Number(seekSlider.value) / 1000);
+});
 
 fileInput.addEventListener("change", () => {
     const file = fileInput.files?.[0];
@@ -212,10 +468,11 @@ fileInput.addEventListener("change", () => {
     }
 });
 
-window.addEventListener("resize", renderGraph);
+window.addEventListener("resize", () => {
+    renderActiveView(getPlaybackTimeSec());
+});
 
 void loadDefault().catch((error: unknown) => {
-    setLoading(false);
     meta.innerHTML = `<span>Failed to load default WAV: ${String(error)}</span>`;
     console.error(error);
 });

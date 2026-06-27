@@ -7,6 +7,8 @@ import { nominalCenterForBandwidth } from "./rtaNominals";
 export interface FrequencyBinData {
     frequency: number;
     dbfs: number;
+    dbfsA: number;
+    dbfsC: number;
     splZ: number;
     splA: number;
     splC: number;
@@ -180,14 +182,16 @@ class RTA {
                 let bandDbfsC = -120;
 
                 if (binsFound > 0 && sumZ > 0) {
-                    bandDbfsZ = 10 * Math.log10(sumZ / binsFound);
-                    bandDbfsA = 10 * Math.log10(sumA / binsFound);
-                    bandDbfsC = 10 * Math.log10(sumC / binsFound);
+                    bandDbfsZ = 10 * Math.log10(sumZ);
+                    bandDbfsA = 10 * Math.log10(sumA);
+                    bandDbfsC = 10 * Math.log10(sumC);
                 }
 
                 collapsedBandFrame[b] = {
                     frequency: band.centerFrequency,
                     dbfs: parseFloat(bandDbfsZ.toFixed(2)),
+                    dbfsA: parseFloat(bandDbfsA.toFixed(2)),
+                    dbfsC: parseFloat(bandDbfsC.toFixed(2)),
                     splZ: parseFloat(this.spl.measureFromDbfs(bandDbfsZ).toFixed(2)),
                     splA: parseFloat(this.spl.measureFromDbfs(bandDbfsA).toFixed(2)),
                     splC: parseFloat(this.spl.measureFromDbfs(bandDbfsC).toFixed(2)),

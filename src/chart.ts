@@ -24,6 +24,7 @@ export type SplChartOptions = {
     title: string;
     yLabel?: string;
     series: ChartSeries[];
+    playheadSec?: number;
 };
 
 export class SplChart {
@@ -123,6 +124,18 @@ export class SplChart {
 
         for (const series of options.series) {
             this.drawSeries(ctx, series, xScale, yScale);
+        }
+
+        if (options.playheadSec !== undefined && options.playheadSec >= 0) {
+            const x = xScale(Math.min(options.playheadSec, xMax));
+            ctx.strokeStyle = "#ff6b8a";
+            ctx.lineWidth = 2;
+            ctx.setLineDash([4, 4]);
+            ctx.beginPath();
+            ctx.moveTo(x, pad.top);
+            ctx.lineTo(x, height - pad.bottom);
+            ctx.stroke();
+            ctx.setLineDash([]);
         }
     }
 

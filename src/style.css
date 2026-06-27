@@ -215,10 +215,72 @@ h1 {
     box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
 }
 
-#chart {
+.playback-bar {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-bottom: 1rem;
+    padding: 0.65rem 1rem;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--panel);
+}
+
+.playback-bar[hidden] {
+    display: none;
+}
+
+.play-btn {
+    flex-shrink: 0;
+    width: 2.25rem;
+    height: 2.25rem;
+    border: 1px solid var(--border);
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--accent) 18%, var(--panel));
+    color: var(--text);
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.15s ease, transform 0.1s ease;
+}
+
+.play-btn:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 30%, var(--panel));
+}
+
+.play-btn:active:not(:disabled) {
+    transform: scale(0.94);
+}
+
+.play-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
+#seek-slider {
+    flex: 1;
+    accent-color: var(--accent);
+    cursor: pointer;
+}
+
+.playback-time {
+    flex-shrink: 0;
+    min-width: 7rem;
+    font-size: 0.85rem;
+    font-variant-numeric: tabular-nums;
+    color: var(--muted);
+    text-align: right;
+}
+
+#chart,
+#rta-chart {
     display: block;
     width: 100%;
     height: auto;
+}
+
+#chart[hidden],
+#rta-chart[hidden] {
+    display: none;
 }
 
 .loading {
