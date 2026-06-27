@@ -8,12 +8,14 @@
  */
 
 import Leq from "../audio analysis/Leq";
-import RTA, { FrequencyBinData } from "../audio analysis/RTA";
+import Spectrogram from "../audio analysis/Spectrogram";
+import { FrequencyBinData } from "../audio analysis/RTA";
 import SPL from "../audio analysis/SPL";
 import { Weighting } from "../audio analysis/dsp";
 import Wav from "../audio analysis/Wav";
 import { ChartPoint, ChartSeries, SplChart } from "./chart";
 import { RtaChart } from "./rtaChart";
+import { SpectrogramChart } from "./spectrogramChart";
 
 type TraceKey = "SPLZ" | "SPLA" | "SPLC" | "LZEQ" | "LAEQ" | "LCEQ";
 type ViewMode = "time" | "rta";
@@ -52,7 +54,9 @@ const timeSeriesBar = document.getElementById("time-series-bar") as HTMLDivEleme
 const meta = document.getElementById("meta") as HTMLElement;
 const loading = document.getElementById("loading") as HTMLParagraphElement;
 const chartCanvas = document.getElementById("chart") as HTMLCanvasElement;
+const rtaStack = document.getElementById("rta-stack") as HTMLDivElement;
 const rtaChartCanvas = document.getElementById("rta-chart") as HTMLCanvasElement;
+const spectrogramChartCanvas = document.getElementById("spectrogram-chart") as HTMLCanvasElement;
 const playbackBar = document.getElementById("playback-bar") as HTMLElement;
 const playBtn = document.getElementById("play-btn") as HTMLButtonElement;
 const seekSlider = document.getElementById("seek-slider") as HTMLInputElement;
@@ -60,6 +64,7 @@ const playbackTime = document.getElementById("playback-time") as HTMLSpanElement
 
 const chart = new SplChart(chartCanvas);
 const rtaChart = new RtaChart(rtaChartCanvas);
+const spectrogramChart = new SpectrogramChart(spectrogramChartCanvas);
 const audioContext = new AudioContext();
 
 const traceData = new Map<TraceKey, ChartPoint[]>();
@@ -216,7 +221,7 @@ function setViewMode(mode: ViewMode): void {
     const isRta = mode === "rta";
 
     chartCanvas.hidden = isRta;
-    rtaChartCanvas.hidden = !isRta;
+    rtaStack.hidden = !isRta;
     timeSeriesBar.hidden = isRta;
     rtaWeightingControl.hidden = !isRta;
     rtaBandwidthControl.hidden = !isRta;
@@ -336,6 +341,13 @@ function renderRtaGraph(timeSec: number): void {
         timeSec,
         durationSec: currentWav.duration,
     });
+
+    spectrogramChart.draw(rtaFrames, {
+        title: "Spectrogram",
+        weighting: rtaWeighting,
+        playheadSec: timeSec,
+        durationSec: currentWav.duration,
+    });
 }
 
 function renderActiveView(timeSec?: number): void {
@@ -365,10 +377,10 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
         leq.setTotalMeasurementTime(Math.ceil(wav.duration));
         leq.calibrate(94, { weighting: "Z", speed: "INST" });
 
-        const rta = new RTA(wav, rtaBandwidth, RTA_FFT_SIZE);
-        rta.calibrate(94, { weighting: "Z", speed: "INST" });
-        rtaFrames = rta.calculate(0, "hann");
-        rtaFrameDurationSec = RTA_FFT_SIZE / wav.sampleRate;
+        const spectrogram = new Spectrogram(wav, rtaBandwidth, RTA_FFT_SIZE);
+        spectrogram.calibrate(94, { weighting: "Z", speed: "INST" });
+        rtaFrames = spectrogram.calculate(0, "hann");
+        rtaFrameDurationSec = spectrogram.getFrameDurationSec();
 
         renderMeta(wav, spl, leq, rtaFrames.length);
 

@@ -59,7 +59,10 @@
                     <div class="series-toggles" id="series-toggles"></div>
                 </div>
                 <canvas id="chart" width="960" height="420"></canvas>
-                <canvas id="rta-chart" width="960" height="420" hidden></canvas>
+                <div class="rta-stack" id="rta-stack" hidden>
+                    <canvas id="rta-chart" width="960" height="420"></canvas>
+                    <canvas id="spectrogram-chart" width="960" height="280"></canvas>
+                </div>
                 <p class="loading" id="loading" hidden>Analyzing audio…</p>
             </section>
         </div>

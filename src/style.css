@@ -272,14 +272,22 @@ h1 {
 }
 
 #chart,
-#rta-chart {
+#rta-stack,
+#rta-chart,
+#spectrogram-chart {
     display: block;
     width: 100%;
     height: auto;
 }
 
+.rta-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+}
+
 #chart[hidden],
-#rta-chart[hidden] {
+#rta-stack[hidden] {
     display: none;
 }
 

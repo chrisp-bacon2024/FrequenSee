@@ -60,6 +60,14 @@ class RTA {
         this.spl.setCalibrationOffsetDb(offsetDb);
     }
 
+    getFftSize(): number {
+        return this.N;
+    }
+
+    getFrameDurationSec(): number {
+        return this.N / this.sampleRate;
+    }
+
     private nominalCenter(fc: number): number {
         return nominalCenterForBandwidth(fc, this.bandwidth);
     }

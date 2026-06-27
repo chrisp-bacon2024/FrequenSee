@@ -114,10 +114,13 @@ export class RtaChart {
         ctx.fillText("Frequency (Hz)", pad.left + plotW / 2, height - 28);
 
         ctx.save();
-        ctx.translate(16, pad.top + plotH / 2);
+        ctx.translate(12, pad.top + plotH / 2);
         ctx.rotate(-Math.PI / 2);
         ctx.fillText("dBFS", 0, 0);
         ctx.restore();
+
+        const plotRight = pad.left + plotW;
+        const barGap = 1;
 
         for (let i = 0; i < frame.length; i++) {
             const band = frame[i];
@@ -125,18 +128,24 @@ export class RtaChart {
             if (!Number.isFinite(level) || level <= yMin) continue;
 
             const clampedLevel = Math.min(yMax, Math.max(yMin, level));
-            const prevFreq = i > 0 ? frame[i - 1].frequency : band.frequency / 1.26;
-            const nextFreq = i < frame.length - 1 ? frame[i + 1].frequency : band.frequency * 1.26;
             const xCenter = xScale(band.frequency);
-            const xRight = xScale(Math.sqrt(band.frequency * nextFreq));
-            const xLeft = xScale(Math.sqrt(prevFreq * band.frequency));
-            const barW = Math.max(4, xRight - xLeft - 2);
+            const xLeft =
+                i > 0
+                    ? (xScale(frame[i - 1].frequency) + xCenter) / 2
+                    : pad.left;
+            const xRight =
+                i < frame.length - 1
+                    ? (xCenter + xScale(frame[i + 1].frequency)) / 2
+                    : plotRight;
+
+            const barX = xLeft + barGap / 2;
+            const barW = Math.max(1, xRight - xLeft - barGap);
             const barH = Math.max(0, yScale(yMin) - yScale(clampedLevel));
 
             const t = (Math.log10(band.frequency) - logMin) / (logMax - logMin);
             const hue = 210 - t * 50;
             ctx.fillStyle = `hsl(${hue}, 75%, 58%)`;
-            ctx.fillRect(xCenter - barW / 2, yScale(clampedLevel), barW, barH);
+            ctx.fillRect(barX, yScale(clampedLevel), barW, barH);
         }
     }
 }
