@@ -10,7 +10,7 @@
  * @module Leq
  */
 
-import Wav from "./wav";
+import Wav from "./Wav";
 import SPL from "./SPL";
 import { TimeWeighting, Weighting } from "./dsp";
 

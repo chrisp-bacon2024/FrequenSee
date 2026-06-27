@@ -10,7 +10,7 @@
 import Leq from "../audio analysis/Leq";
 import SPL from "../audio analysis/SPL";
 import { Weighting } from "../audio analysis/dsp";
-import Wav from "../audio analysis/wav";
+import Wav from "../audio analysis/Wav";
 import { ChartPoint, ChartSeries, SplChart } from "./chart";
 
 type TraceKey = "SPLZ" | "SPLA" | "SPLC" | "LZEQ" | "LAEQ" | "LCEQ";

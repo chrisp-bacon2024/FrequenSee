@@ -131,7 +131,7 @@ function getWeightingSOS(weighting: "C", sampleRate: number): BiquadSection[] {
     return sos;
 }
 
-function weightingGainLinear(frequencyHz: number, weighting: "A" | "C"): number {
+export function weightingGainLinear(frequencyHz: number, weighting: "A" | "C"): number {
     if (frequencyHz <= 0) return 0;
 
     const f2 = frequencyHz * frequencyHz;

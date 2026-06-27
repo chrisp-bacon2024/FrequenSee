@@ -10,7 +10,7 @@ import { decode } from "wav-decoder";
 
 import SPL from "../audio analysis/SPL";
 import { TimeWeighting, Weighting } from "../audio analysis/dsp";
-import Wav from "../audio analysis/wav";
+import Wav from "../audio analysis/Wav";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEST_WAV = join(__dirname, "audio files", "test_1kHz.wav");

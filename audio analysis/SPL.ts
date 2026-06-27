@@ -7,7 +7,7 @@
  * @module SPL
  */
 
-import Wav from "./wav";
+import Wav from "./Wav";
 import {
     applyWeighting,
     dbFromRatio,
@@ -83,6 +83,14 @@ class SPL {
         }
 
         return db + this.calibrationOffsetDb;
+    }
+
+    /** Applies calibration offset to an already-computed dBFS value (no re-measurement). */
+    measureFromDbfs(dbfs: number, mode: LevelMode = "SPL"): number {
+        if (mode === "dBFS") {
+            return dbfs;
+        }
+        return dbfs + this.calibrationOffsetDb;
     }
 
     /**
