@@ -10,7 +10,7 @@ import { decode } from "wav-decoder";
 
 import Leq from "../audio analysis/Leq";
 import SPL from "../audio analysis/SPL";
-import Wav from "../audio analysis/wav";
+import Wav from "../audio analysis/Wav";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TWO_LEVEL_WAV = join(__dirname, "audio files", "test_two_level.wav");

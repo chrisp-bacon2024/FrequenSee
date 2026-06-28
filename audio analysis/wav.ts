@@ -10,12 +10,13 @@
 
 class Wav {
     /** @param source - Uploaded `File` or URL string fetched in the browser. */
+    bitDepth: number | null = null;
     constructor(private source: File | string) {}
 
     /**
      * Builds a `Wav` from already-decoded channel data (no `AudioContext`).
      * Used by command-line tests.
-     */
+    */
     static fromDecodedData(sampleRate: number, channels: Float32Array[]): Wav {
         const wav = new Wav("");
         wav.sampleRate = sampleRate;
@@ -51,6 +52,11 @@ class Wav {
                       return response.arrayBuffer();
                   });
 
+        // Create a DataView to read specific byte offsets. 
+        // Use true for little-endian encoding (standard for WAV files).
+        const headerView = new DataView(arrayBuffer);
+        this.bitDepth = headerView.getUint16(34, true);
+        
         this.audioBuffer = await ctx.decodeAudioData(arrayBuffer);
         this.sampleRate = this.audioBuffer.sampleRate;
         this.channelCount = this.audioBuffer.numberOfChannels;

@@ -1,26 +1,26 @@
 /**
  * Equivalent continuous sound level (Leq) from decoded WAV data.
  *
- * Leq averages **energy** over time (not decibels directly). Use
- * {@link calculate} for one value over the integration period, or
- * {@link measureOverTime} for cumulative Leq from the start of the file.
- *
- * Leq does not use Fast/Slow time weighting; sub-intervals typically use INST RMS.
- *
  * @module Leq
  */
 
-import Wav from "./wav";
+import Wav from "./Wav";
 import SPL from "./SPL";
-import { TimeWeighting, Weighting } from "./dsp";
+import { applyWeighting, dbFromRatio, rms, TimeWeighting, Weighting } from "./dsp";
+
+export type LeqMeasureOverTimeOptions = {
+    channel?: number;
+    weighting?: Weighting;
+    speed?: TimeWeighting;
+    stepMs?: number;
+    /** Pre-weighted channel from {@link buildWeightedChannelCache}. */
+    weighted?: Float32Array;
+};
 
 class Leq {
     private spl: SPL;
 
-    /** Maximum integration length in seconds (default 600 = 10 minutes). */
     public totalMeasurementTime = 600;
-
-    /** Length of each sub-interval summed into Leq, in seconds (default 1). */
     public sample_duration = 1;
 
     constructor(private wav: Wav) {
@@ -43,25 +43,51 @@ class Leq {
         this.sample_duration = duration;
     }
 
-    /** Delegates to internal {@link SPL.calibrate}. */
     calibrate(knownSplDb: number, options: { weighting?: Weighting; speed?: TimeWeighting } = {}): number {
         return this.spl.calibrate(knownSplDb, options);
     }
 
-    /** Sets the same calibration offset used by SPL measurements. */
     setCalibrationOffsetDb(offsetDb: number): void {
         this.spl.setCalibrationOffsetDb(offsetDb);
     }
 
-    /**
-     * Single Leq value over integrated sub-intervals up to
-     * {@link totalMeasurementTime} or file length, whichever is shorter.
-     */
-    calculate(
+    private resolveWeighted(
+        channel: number,
         weighting: Weighting,
-        speed: TimeWeighting = "INST",
-        channel = 0
+        weightedInput?: Float32Array
+    ): Float32Array {
+        const samples = this.wav.channels[channel];
+        if (!samples) throw new Error("Invalid channel");
+        if (weightedInput) return weightedInput;
+        if (weighting === "Z") return samples;
+        return applyWeighting(samples, weighting, this.wav.sampleRate);
+    }
+
+    private windowLinearEnergy(
+        weighted: Float32Array,
+        start: number,
+        end: number,
+        calibrationOffsetDb: number
     ): number {
+        const duration = (end - start) / this.wav.sampleRate;
+        const levelDb = dbFromRatio(rms(weighted, start, end)) + calibrationOffsetDb;
+        if (!Number.isFinite(levelDb)) return 0;
+        return Math.pow(10, levelDb / 10) * duration;
+    }
+
+    private windowLinearEnergyFromSumSq(
+        sumSq: number,
+        sampleCount: number,
+        calibrationOffsetDb: number,
+        durationSec: number
+    ): number {
+        if (sampleCount <= 0 || durationSec <= 0) return 0;
+        const levelDb = dbFromRatio(Math.sqrt(sumSq / sampleCount)) + calibrationOffsetDb;
+        if (!Number.isFinite(levelDb)) return 0;
+        return Math.pow(10, levelDb / 10) * durationSec;
+    }
+
+    calculate(weighting: Weighting, speed: TimeWeighting = "INST", channel = 0): number {
         const samples = this.wav.channels[channel];
         if (!samples) throw new Error("Invalid channel");
 
@@ -71,51 +97,31 @@ class Leq {
             samples.length,
             Math.floor(this.totalMeasurementTime * sampleRate)
         );
+        const weighted = this.resolveWeighted(channel, weighting);
+        const calibrationOffsetDb = this.spl.getCalibrationOffsetDb();
 
         let energySum = 0;
         let integratedSeconds = 0;
 
         for (let start = 0; start + windowSamples <= maxSamples; start += windowSamples) {
             const end = start + windowSamples;
-            const actualDuration = (end - start) / sampleRate;
-            const levelDb = this.spl.measure({
-                channel,
-                startSample: start,
-                endSample: end,
-                weighting,
-                speed,
-                mode: "SPL",
-            });
-
-            if (!Number.isFinite(levelDb)) continue;
-
-            energySum += Math.pow(10, levelDb / 10) * actualDuration;
-            integratedSeconds += actualDuration;
+            const linearEnergy = this.windowLinearEnergy(
+                weighted,
+                start,
+                end,
+                calibrationOffsetDb
+            );
+            if (linearEnergy <= 0) continue;
+            energySum += linearEnergy;
+            integratedSeconds += windowSamples / sampleRate;
         }
 
         if (integratedSeconds <= 0) return -Infinity;
-
         return 10 * Math.log10(energySum / integratedSeconds);
     }
 
-    /**
-     * Cumulative Leq from t = 0 to each time step (for graphing).
-     * Partial final sub-intervals are included at each step.
-     */
-    measureOverTime(
-        options: {
-            channel?: number;
-            weighting?: Weighting;
-            speed?: TimeWeighting;
-            stepMs?: number;
-        } = {}
-    ): { timeSec: number; levelDb: number }[] {
-        const {
-            channel = 0,
-            weighting = "Z",
-            speed = "INST",
-            stepMs = 100,
-        } = options;
+    measureOverTime(options: LeqMeasureOverTimeOptions = {}): { timeSec: number; levelDb: number }[] {
+        const { channel = 0, weighting = "Z", stepMs = 100, weighted: weightedInput } = options;
 
         const samples = this.wav.channels[channel];
         if (!samples) throw new Error("Invalid channel");
@@ -126,74 +132,78 @@ class Leq {
             samples.length,
             Math.floor(this.totalMeasurementTime * sampleRate)
         );
+        const windowSamples = Math.max(1, Math.floor(this.sample_duration * sampleRate));
+        const windowDuration = windowSamples / sampleRate;
+        const weighted = this.resolveWeighted(channel, weighting, weightedInput);
+        const calibrationOffsetDb = this.spl.getCalibrationOffsetDb();
+
+        const fullWindowCount = Math.floor(maxSamples / windowSamples);
+        const windowLinearEnergy = new Float64Array(fullWindowCount);
+        for (let w = 0; w < fullWindowCount; w++) {
+            const start = w * windowSamples;
+            windowLinearEnergy[w] = this.windowLinearEnergy(
+                weighted,
+                start,
+                start + windowSamples,
+                calibrationOffsetDb
+            );
+        }
 
         const results: { timeSec: number; levelDb: number }[] = [];
+        let completedWindows = 0;
+        let energySum = 0;
+        let integratedSeconds = 0;
+        let partialBase = 0;
+        let partialSumSq = 0;
+        let prevEnd = 0;
 
         for (let end = stepSamples; end <= maxSamples; end += stepSamples) {
+            const fullWindowsAtEnd = Math.floor(end / windowSamples);
+
+            while (completedWindows < fullWindowsAtEnd) {
+                energySum += windowLinearEnergy[completedWindows];
+                integratedSeconds += windowDuration;
+                completedWindows++;
+            }
+
+            const partialStart = completedWindows * windowSamples;
+            if (partialStart !== partialBase) {
+                partialBase = partialStart;
+                partialSumSq = 0;
+                prevEnd = partialStart;
+            }
+
+            for (let i = prevEnd; i < end; i++) {
+                const sample = weighted[i];
+                partialSumSq += sample * sample;
+            }
+            prevEnd = end;
+
+            let totalEnergy = energySum;
+            let totalSeconds = integratedSeconds;
+
+            const remainder = end - partialStart;
+            if (remainder > 0) {
+                const partialEnergy = this.windowLinearEnergyFromSumSq(
+                    partialSumSq,
+                    remainder,
+                    calibrationOffsetDb,
+                    remainder / sampleRate
+                );
+                if (partialEnergy > 0) {
+                    totalEnergy += partialEnergy;
+                    totalSeconds += remainder / sampleRate;
+                }
+            }
+
             results.push({
                 timeSec: end / sampleRate,
-                levelDb: this.cumulativeLeqUpTo(end, channel, weighting, speed),
+                levelDb:
+                    totalSeconds > 0 ? 10 * Math.log10(totalEnergy / totalSeconds) : -Infinity,
             });
         }
 
         return results;
-    }
-
-    private cumulativeLeqUpTo(
-        endSample: number,
-        channel: number,
-        weighting: Weighting,
-        speed: TimeWeighting
-    ): number {
-        const sampleRate = this.wav.sampleRate;
-        const windowSamples = Math.max(1, Math.floor(this.sample_duration * sampleRate));
-
-        let energySum = 0;
-        let integratedSeconds = 0;
-
-        const fullWindows = Math.floor(endSample / windowSamples);
-
-        for (let i = 0; i < fullWindows; i++) {
-            const start = i * windowSamples;
-            const end = start + windowSamples;
-            const duration = windowSamples / sampleRate;
-            const levelDb = this.spl.measure({
-                channel,
-                startSample: start,
-                endSample: end,
-                weighting,
-                speed,
-                mode: "SPL",
-            });
-
-            if (!Number.isFinite(levelDb)) continue;
-
-            energySum += Math.pow(10, levelDb / 10) * duration;
-            integratedSeconds += duration;
-        }
-
-        const remainder = endSample - fullWindows * windowSamples;
-        if (remainder > 0) {
-            const start = fullWindows * windowSamples;
-            const duration = remainder / sampleRate;
-            const levelDb = this.spl.measure({
-                channel,
-                startSample: start,
-                endSample: endSample,
-                weighting,
-                speed,
-                mode: "SPL",
-            });
-
-            if (Number.isFinite(levelDb)) {
-                energySum += Math.pow(10, levelDb / 10) * duration;
-                integratedSeconds += duration;
-            }
-        }
-
-        if (integratedSeconds <= 0) return -Infinity;
-
-        return 10 * Math.log10(energySum / integratedSeconds);
     }
 }
 

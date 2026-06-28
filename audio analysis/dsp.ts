@@ -22,6 +22,43 @@ export type BiquadSection = {
 
 const weightingCache = new Map<string, BiquadSection[]>();
 
+/** Use block FFT for A-weighting above this many samples (~23 s @ 44.1 kHz). */
+export const FULL_FFT_A_THRESHOLD = 1_048_576;
+
+const A_WEIGHTING_BLOCK_SIZE = 65536;
+
+export const DEFAULT_MAX_TRACE_POINTS = 1500;
+
+/** Step size (ms) capped so long files do not produce excessive trace points. */
+export function traceStepMs(
+    durationSec: number,
+    baseStepMs: number,
+    maxPoints = DEFAULT_MAX_TRACE_POINTS
+): number {
+    if (durationSec <= 0) return baseStepMs;
+    const pointsAtBase = Math.ceil((durationSec * 1000) / baseStepMs);
+    if (pointsAtBase <= maxPoints) return baseStepMs;
+    return Math.ceil((durationSec * 1000) / maxPoints);
+}
+
+export type WeightedChannelCache = Partial<Record<Weighting, Float32Array>>;
+
+/** Precomputes weighted channels once for the given weightings (Z shares raw samples). */
+export function buildWeightedChannelCache(
+    samples: Float32Array,
+    sampleRate: number,
+    weightings: Iterable<Weighting>
+): WeightedChannelCache {
+    const cache: WeightedChannelCache = { Z: samples };
+    for (const weighting of weightings) {
+        if (weighting === "Z") continue;
+        if (!cache[weighting]) {
+            cache[weighting] = applyWeighting(samples, weighting, sampleRate);
+        }
+    }
+    return cache;
+}
+
 /** Root mean square of samples in `[start, end)`. Returns 0 if the range is empty. */
 export function rms(samples: Float32Array, start = 0, end = samples.length): number {
     const length = end - start;
@@ -131,7 +168,7 @@ function getWeightingSOS(weighting: "C", sampleRate: number): BiquadSection[] {
     return sos;
 }
 
-function weightingGainLinear(frequencyHz: number, weighting: "A" | "C"): number {
+export function weightingGainLinear(frequencyHz: number, weighting: "A" | "C"): number {
     if (frequencyHz <= 0) return 0;
 
     const f2 = frequencyHz * frequencyHz;
@@ -159,6 +196,36 @@ function nextPow2(value: number): number {
 }
 
 function applyFrequencyWeighting(
+    samples: Float32Array,
+    sampleRate: number,
+    weighting: "A" | "C"
+): Float32Array {
+    if (weighting === "A" && samples.length > FULL_FFT_A_THRESHOLD) {
+        return applyFrequencyWeightingBlocked(samples, sampleRate, weighting);
+    }
+
+    return applyFrequencyWeightingFft(samples, sampleRate, weighting);
+}
+
+function applyFrequencyWeightingBlocked(
+    samples: Float32Array,
+    sampleRate: number,
+    weighting: "A" | "C"
+): Float32Array {
+    const output = new Float32Array(samples.length);
+    const blockSize = A_WEIGHTING_BLOCK_SIZE;
+
+    for (let offset = 0; offset < samples.length; offset += blockSize) {
+        const end = Math.min(offset + blockSize, samples.length);
+        const block = samples.subarray(offset, end);
+        const weighted = applyFrequencyWeightingFft(block, sampleRate, weighting);
+        output.set(weighted, offset);
+    }
+
+    return output;
+}
+
+function applyFrequencyWeightingFft(
     samples: Float32Array,
     sampleRate: number,
     weighting: "A" | "C"

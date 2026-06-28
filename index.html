@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<!-- SPL Visualizer: upload a WAV and view SPL / Leq graphs. See README.md. -->
+<!-- SPL Visualizer: upload a WAV and view SPL / Leq / RTA graphs. See README.md. -->
 <html lang="en">
     <head>
         <meta charset="UTF-8" />
@@ -12,7 +12,7 @@
             <header class="header">
                 <div>
                     <h1>SPL Visualizer</h1>
-                    <p class="subtitle">Sound pressure level over time</p>
+                    <p class="subtitle">Sound level and RTA analysis</p>
                 </div>
                 <div class="controls">
                     <label class="control">
@@ -20,16 +20,49 @@
                         <input type="file" id="file-input" accept="audio/wav,audio/*" />
                     </label>
                     <label class="control">
-                        <span>Graph</span>
-                        <select id="graph-select" disabled></select>
+                        <span>View</span>
+                        <select id="view-select">
+                            <option value="time">Level over time</option>
+                            <option value="rta">RTA spectrum</option>
+                        </select>
+                    </label>
+                    <label class="control rta-only" id="rta-weighting-control" hidden>
+                        <span>RTA weighting</span>
+                        <select id="rta-weighting-select">
+                            <option value="Z">Z</option>
+                            <option value="A">A</option>
+                            <option value="C">C</option>
+                        </select>
+                    </label>
+                    <label class="control rta-only" id="rta-bandwidth-control" hidden>
+                        <span>RTA bandwidth</span>
+                        <select id="rta-bandwidth-select">
+                            <option value="1">1/1 octave</option>
+                            <option value="0.3333333333" selected>1/3 octave</option>
+                            <option value="0.1666666667">1/6 octave</option>
+                        </select>
                     </label>
                 </div>
             </header>
 
             <section class="meta" id="meta"></section>
 
+            <section class="playback-bar" id="playback-bar" hidden>
+                <button type="button" class="play-btn" id="play-btn" aria-label="Play">▶</button>
+                <input type="range" id="seek-slider" min="0" max="1000" value="0" step="1" />
+                <span class="playback-time" id="playback-time">0:00 / 0:00</span>
+            </section>
+
             <section class="chart-panel">
+                <div class="series-bar" id="time-series-bar">
+                    <span class="series-bar-label">Traces</span>
+                    <div class="series-toggles" id="series-toggles"></div>
+                </div>
                 <canvas id="chart" width="960" height="420"></canvas>
+                <div class="rta-stack" id="rta-stack" hidden>
+                    <canvas id="rta-chart" width="960" height="420"></canvas>
+                    <canvas id="spectrogram-chart" width="960" height="280"></canvas>
+                </div>
                 <p class="loading" id="loading" hidden>Analyzing audio…</p>
             </section>
         </div>
