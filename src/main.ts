@@ -53,6 +53,8 @@ const rtaWeightingControl = document.getElementById("rta-weighting-control") as 
 const rtaWeightingSelect = document.getElementById("rta-weighting-select") as HTMLSelectElement;
 const rtaBandwidthControl = document.getElementById("rta-bandwidth-control") as HTMLLabelElement;
 const rtaBandwidthSelect = document.getElementById("rta-bandwidth-select") as HTMLSelectElement;
+const rtaAveragingControl = document.getElementById("rta-averaging-control") as HTMLLabelElement;
+const rtaAveragingSelect = document.getElementById("rta-averaging-select") as HTMLSelectElement;
 const seriesToggles = document.getElementById("series-toggles") as HTMLDivElement;
 const timeSeriesBar = document.getElementById("time-series-bar") as HTMLDivElement;
 const meta = document.getElementById("meta") as HTMLElement;
@@ -88,6 +90,7 @@ let rtaFrameDurationSec = 0;
 let viewMode: ViewMode = "time";
 let rtaWeighting: Weighting = "Z";
 let rtaBandwidth = 1 / 3;
+let rtaAveragingDepth = 1;
 
 let sourceNode: AudioBufferSourceNode | null = null;
 let playbackContextStart = 0;
@@ -317,6 +320,7 @@ function setViewMode(mode: ViewMode): void {
     timeSeriesBar.hidden = isRta;
     rtaWeightingControl.hidden = !isRta;
     rtaBandwidthControl.hidden = !isRta;
+    rtaAveragingControl.hidden = !isRta;
 
     updatePlaybackUi();
 }
@@ -494,6 +498,7 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
         const analysisStart = performance.now();
 
         const spectrogram = new Spectrogram(wav, rtaBandwidth, RTA_FFT_SIZE);
+        spectrogram.setAveragingDepth(rtaAveragingDepth);
         spectrogram.calibrate(94, { weighting: "Z", speed: "INST" });
 
         const rtaStart = performance.now();
@@ -583,6 +588,14 @@ rtaBandwidthSelect.addEventListener("change", () => {
     rtaBandwidth = Number(rtaBandwidthSelect.value);
     if (currentWav) {
         void analyzeWav(currentWav, currentFileName);
+    }
+});
+
+rtaAveragingSelect.addEventListener("change", () => {
+    rtaAveragingDepth = Number(rtaAveragingSelect.value);
+    if (currentSpectrogram) {
+        currentSpectrogram.setAveragingDepth(rtaAveragingDepth);
+        renderActiveView(getPlaybackTimeSec());
     }
 });
 
