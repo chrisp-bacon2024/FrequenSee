@@ -9,7 +9,6 @@
 
 import Leq from "../audio analysis/Leq";
 import Spectrogram from "../audio analysis/Spectrogram";
-import { FrequencyBinData } from "../audio analysis/RTA";
 import SPL from "../audio analysis/SPL";
 import { Weighting } from "../audio analysis/dsp";
 import Wav from "../audio analysis/Wav";
@@ -74,7 +73,8 @@ const enabledTraces = new Set<TraceKey>(
 
 let currentFileName = "";
 let currentWav: Wav | null = null;
-let rtaFrames: FrequencyBinData[][] = [];
+let currentSpectrogram: Spectrogram | null = null;
+let rtaHopSamples = RTA_FFT_SIZE;
 let rtaFrameDurationSec = 0;
 let viewMode: ViewMode = "time";
 let rtaWeighting: Weighting = "Z";
@@ -87,6 +87,17 @@ let isPlaying = false;
 let isSeeking = false;
 let animFrameId = 0;
 
+type AnalysisTimings = {
+    rtaMs: number;
+    tracesMs?: number;
+    totalMs?: number;
+};
+
+function formatDurationMs(ms: number): string {
+    if (ms < 1000) return `${Math.round(ms)} ms`;
+    return `${(ms / 1000).toFixed(2)} s`;
+}
+
 function formatTime(sec: number): string {
     const m = Math.floor(sec / 60);
     const s = Math.floor(sec % 60);
@@ -94,9 +105,9 @@ function formatTime(sec: number): string {
 }
 
 function frameIndexForTime(timeSec: number): number {
-    if (rtaFrames.length === 0 || !currentWav) return 0;
-    const idx = Math.floor((timeSec * currentWav.sampleRate) / RTA_FFT_SIZE);
-    return Math.max(0, Math.min(rtaFrames.length - 1, idx));
+    if (!currentSpectrogram || currentSpectrogram.getFrameCount() === 0 || !currentWav) return 0;
+    const idx = Math.floor((timeSec * currentWav.sampleRate) / rtaHopSamples);
+    return Math.max(0, Math.min(currentSpectrogram.getFrameCount() - 1, idx));
 }
 
 function getPlaybackTimeSec(): number {
@@ -283,8 +294,9 @@ function populateSeriesToggles(): void {
     }
 }
 
-function setLoading(isLoading: boolean): void {
+function setLoading(isLoading: boolean, message = "Analyzing audio…"): void {
     loading.hidden = !isLoading;
+    loading.textContent = message;
     fileInput.disabled = isLoading;
     playBtn.disabled = isLoading || !currentWav?.audioBuffer;
 
@@ -293,7 +305,27 @@ function setLoading(isLoading: boolean): void {
     });
 }
 
-function renderMeta(wav: Wav, spl: SPL, leq: Leq, frameCount: number): void {
+function renderMeta(
+    wav: Wav,
+    spl: SPL,
+    leq: Leq,
+    frameCount: number,
+    timings: AnalysisTimings
+): void {
+    const timingSpans = [
+        `<span><strong>RTA calc:</strong> ${formatDurationMs(timings.rtaMs)}</span>`,
+    ];
+    if (timings.tracesMs !== undefined) {
+        timingSpans.push(
+            `<span><strong>Level traces:</strong> ${formatDurationMs(timings.tracesMs)}</span>`
+        );
+    }
+    if (timings.totalMs !== undefined) {
+        timingSpans.push(
+            `<span><strong>Total analysis:</strong> ${formatDurationMs(timings.totalMs)}</span>`
+        );
+    }
+
     meta.innerHTML = `
         <span><strong>File:</strong> ${currentFileName}</span>
         <span><strong>Duration:</strong> ${wav.duration.toFixed(2)} s</span>
@@ -302,6 +334,7 @@ function renderMeta(wav: Wav, spl: SPL, leq: Leq, frameCount: number): void {
         <span><strong>Calibration:</strong> ${spl.getCalibrationOffsetDb().toFixed(2)} dB offset</span>
         <span><strong>Leq interval:</strong> ${leq.getSampleDuration()} s</span>
         <span><strong>RTA frames:</strong> ${frameCount} (${rtaFrameDurationSec.toFixed(3)} s each)</span>
+        ${timingSpans.join("\n        ")}
     `;
 }
 
@@ -330,10 +363,10 @@ function renderTimeGraph(playheadSec?: number): void {
 }
 
 function renderRtaGraph(timeSec: number): void {
-    if (rtaFrames.length === 0 || !currentWav) return;
+    if (!currentSpectrogram || currentSpectrogram.getFrameCount() === 0 || !currentWav) return;
 
     const frameIndex = frameIndexForTime(timeSec);
-    const frame = rtaFrames[frameIndex];
+    const frame = currentSpectrogram.getFrame(frameIndex);
 
     rtaChart.draw(frame, {
         title: "RTA Spectrum",
@@ -342,7 +375,7 @@ function renderRtaGraph(timeSec: number): void {
         durationSec: currentWav.duration,
     });
 
-    spectrogramChart.draw(rtaFrames, {
+    spectrogramChart.draw(currentSpectrogram, {
         title: "Spectrogram",
         weighting: rtaWeighting,
         playheadSec: timeSec,
@@ -364,12 +397,29 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
     setLoading(true);
     stopPlayback();
     traceData.clear();
-    rtaFrames = [];
+    currentSpectrogram = null;
     currentWav = wav;
     currentFileName = fileName;
     playbackOffsetSec = 0;
 
     try {
+        const analysisStart = performance.now();
+
+        const spectrogram = new Spectrogram(wav, rtaBandwidth, RTA_FFT_SIZE);
+        spectrogram.calibrate(94, { weighting: "Z", speed: "INST" });
+
+        const rtaStart = performance.now();
+        await spectrogram.calculate(0, "hann", {
+            onProgress: (done, total) => {
+                setLoading(true, `RTA: ${done} / ${total} frames`);
+            },
+        });
+        const rtaMs = performance.now() - rtaStart;
+
+        currentSpectrogram = spectrogram;
+        rtaHopSamples = spectrogram.getHopSamples();
+        rtaFrameDurationSec = spectrogram.getFrameDurationSec();
+
         const spl = new SPL(wav);
         spl.calibrate(94, { weighting: "Z", speed: "INST" });
 
@@ -377,13 +427,15 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
         leq.setTotalMeasurementTime(Math.ceil(wav.duration));
         leq.calibrate(94, { weighting: "Z", speed: "INST" });
 
-        const spectrogram = new Spectrogram(wav, rtaBandwidth, RTA_FFT_SIZE);
-        spectrogram.calibrate(94, { weighting: "Z", speed: "INST" });
-        rtaFrames = spectrogram.calculate(0, "hann");
-        rtaFrameDurationSec = spectrogram.getFrameDurationSec();
+        renderMeta(wav, spl, leq, spectrogram.getFrameCount(), { rtaMs });
 
-        renderMeta(wav, spl, leq, rtaFrames.length);
+        if (viewMode === "rta") {
+            setViewMode("rta");
+        }
 
+        setLoading(true, "Computing level traces…");
+
+        const tracesStart = performance.now();
         for (const trace of TRACES) {
             if (trace.kind === "SPL") {
                 traceData.set(
@@ -406,9 +458,12 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
                 );
             }
 
-            // Yield so the browser can paint the loading overlay between heavy traces.
             await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
+        const tracesMs = performance.now() - tracesStart;
+        const totalMs = performance.now() - analysisStart;
+
+        renderMeta(wav, spl, leq, spectrogram.getFrameCount(), { rtaMs, tracesMs, totalMs });
 
         playbackBar.hidden = !wav.audioBuffer;
         seekSlider.value = "0";

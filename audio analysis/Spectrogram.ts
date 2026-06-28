@@ -1,4 +1,4 @@
-import RTA, { FrequencyBinData } from "./RTA";
+import RTA from "./RTA";
 import Wav from "./Wav";
 
 /**
@@ -13,12 +13,6 @@ class Spectrogram extends RTA {
     /** Time in seconds at the start of a frame index. */
     frameTimeSec(frameIndex: number): number {
         return frameIndex * this.getFrameDurationSec();
-    }
-
-    /** Band center frequencies from the most recent analysis (Hz). */
-    getBandFrequencies(): number[] {
-        if (this.timelineAnalysis.length === 0) return [];
-        return this.timelineAnalysis[0].map((band: FrequencyBinData) => band.frequency);
     }
 }
 

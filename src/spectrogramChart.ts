@@ -4,11 +4,16 @@
  * @module spectrogramChart
  */
 
-import type { FrequencyBinData } from "../audio analysis/RTA";
 import type { Weighting } from "../audio analysis/dsp";
 
 const DB_MIN = -100;
 const DB_MAX = 0;
+
+export type SpectrogramDataSource = {
+    getFrameCount(): number;
+    bandFrequencies: Float32Array;
+    getLevelDbfs(frameIndex: number, bandIndex: number, weighting: Weighting): number;
+};
 
 export type SpectrogramChartOptions = {
     title: string;
@@ -16,12 +21,6 @@ export type SpectrogramChartOptions = {
     playheadSec: number;
     durationSec: number;
 };
-
-function bandLevelDbfs(band: FrequencyBinData, weighting: Weighting): number {
-    if (weighting === "A") return band.dbfsA;
-    if (weighting === "C") return band.dbfsC;
-    return band.dbfs;
-}
 
 function formatFrequency(freq: number): string {
     if (freq >= 1000) return `${(freq / 1000).toFixed(freq >= 10000 ? 0 : 1)}k`;
@@ -71,9 +70,11 @@ function levelToRgb(levelDb: number, freqNorm: number): [number, number, number]
 export class SpectrogramChart {
     constructor(private canvas: HTMLCanvasElement) {}
 
-    draw(frames: FrequencyBinData[][], options: SpectrogramChartOptions): void {
+    draw(source: SpectrogramDataSource, options: SpectrogramChartOptions): void {
         const ctx = this.canvas.getContext("2d");
-        if (!ctx || frames.length === 0 || frames[0].length === 0) return;
+        const frameCount = source.getFrameCount();
+        const bandFrequencies = source.bandFrequencies;
+        if (!ctx || frameCount === 0 || bandFrequencies.length === 0) return;
 
         const dpr = window.devicePixelRatio || 1;
         const cssWidth = this.canvas.clientWidth || this.canvas.width;
@@ -90,27 +91,25 @@ export class SpectrogramChart {
         const plotH = height - pad.top - pad.bottom;
         const plotBottom = pad.top + plotH;
 
-        const bandTemplate = frames[0];
-        const minFreq = bandTemplate[0].frequency;
-        const maxFreq = bandTemplate[bandTemplate.length - 1].frequency;
+        const minFreq = bandFrequencies[0];
+        const maxFreq = bandFrequencies[bandFrequencies.length - 1];
         const logMin = Math.log10(minFreq);
         const logMax = Math.log10(maxFreq);
 
         const yForFreq = (freq: number) =>
             pad.top + (1 - (Math.log10(freq) - logMin) / (logMax - logMin)) * plotH;
 
+        const numBands = bandFrequencies.length;
         const bandBounds: { yTop: number; yBottom: number; freqNorm: number }[] = [];
-        for (let i = 0; i < bandTemplate.length; i++) {
-            const freq = bandTemplate[i].frequency;
+        for (let i = 0; i < numBands; i++) {
+            const freq = bandFrequencies[i];
             const yCenter = yForFreq(freq);
             const yTop =
-                i < bandTemplate.length - 1
-                    ? (yCenter + yForFreq(bandTemplate[i + 1].frequency)) / 2
+                i < numBands - 1
+                    ? (yCenter + yForFreq(bandFrequencies[i + 1])) / 2
                     : pad.top;
             const yBottom =
-                i > 0
-                    ? (yCenter + yForFreq(bandTemplate[i - 1].frequency)) / 2
-                    : plotBottom;
+                i > 0 ? (yCenter + yForFreq(bandFrequencies[i - 1])) / 2 : plotBottom;
             const freqNorm = (Math.log10(freq) - logMin) / (logMax - logMin);
             bandBounds.push({ yTop, yBottom, freqNorm });
         }
@@ -119,14 +118,13 @@ export class SpectrogramChart {
         ctx.fillStyle = "#171b26";
         ctx.fillRect(0, 0, width, height);
 
-        const colW = Math.max(1, plotW / frames.length);
+        const colW = Math.max(1, plotW / frameCount);
 
-        for (let f = 0; f < frames.length; f++) {
-            const frame = frames[f];
-            const x = pad.left + (f / frames.length) * plotW;
+        for (let f = 0; f < frameCount; f++) {
+            const x = pad.left + (f / frameCount) * plotW;
 
-            for (let b = 0; b < frame.length; b++) {
-                const level = bandLevelDbfs(frame[b], options.weighting);
+            for (let b = 0; b < numBands; b++) {
+                const level = source.getLevelDbfs(f, b, options.weighting);
                 if (!Number.isFinite(level) || level <= DB_MIN) continue;
 
                 const clamped = Math.min(DB_MAX, Math.max(DB_MIN, level));
@@ -154,11 +152,9 @@ export class SpectrogramChart {
         ctx.strokeStyle = "#252b3a";
         ctx.lineWidth = 1;
 
-        const yTickBands = bandTemplate.filter(
-            (_, index) => index % Math.max(1, Math.floor(bandTemplate.length / 6)) === 0
-        );
-        for (const band of yTickBands) {
-            const y = yForFreq(band.frequency);
+        for (let index = 0; index < numBands; index += Math.max(1, Math.floor(numBands / 6))) {
+            const freq = bandFrequencies[index];
+            const y = yForFreq(freq);
             ctx.beginPath();
             ctx.moveTo(pad.left, y);
             ctx.lineTo(width - pad.right, y);
@@ -166,7 +162,7 @@ export class SpectrogramChart {
 
             ctx.fillStyle = "#8b95a8";
             ctx.textAlign = "right";
-            ctx.fillText(formatFrequency(band.frequency), pad.left - 8, y + 4);
+            ctx.fillText(formatFrequency(freq), pad.left - 8, y + 4);
         }
 
         const xTicks = 5;

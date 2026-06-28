@@ -4,6 +4,10 @@ import { weightingGainLinear, TimeWeighting, Weighting } from "./dsp";
 import SPL from "./SPL";
 import { nominalCenterForBandwidth } from "./rtaNominals";
 
+export const DEFAULT_MAX_FRAMES = 1500;
+
+const POWER_FLOOR = 10 ** (-140 / 10);
+
 export interface FrequencyBinData {
     frequency: number;
     dbfs: number;
@@ -13,6 +17,12 @@ export interface FrequencyBinData {
     splA: number;
     splC: number;
 }
+
+export type CalculateOptions = {
+    maxFrames?: number;
+    onProgress?: (framesDone: number, frameCount: number) => void;
+    yieldEvery?: number;
+};
 
 interface PreCalculatedBand {
     centerFrequency: number;
@@ -29,12 +39,19 @@ class RTA {
     private maxFrequency: number = 20000;
     private sampleRate: number = 0;
     private spl: SPL;
+    private gainA: Float32Array = new Float32Array(0);
+    private gainC: Float32Array = new Float32Array(0);
+    private hopSamples: number = 2048;
 
-    timelineAnalysis: FrequencyBinData[][] = [];
+    bandFrequencies: Float32Array = new Float32Array(0);
+    private dbfsZFrames: Float32Array[] = [];
+    private dbfsAFrames: Float32Array[] = [];
+    private dbfsCFrames: Float32Array[] = [];
 
     constructor(private source: Wav, private bandwidth: number = 1, private N: number = 2048) {
         this.spl = new SPL(source);
         this.sampleRate = this.source.sampleRate;
+        this.hopSamples = N;
 
         if (N <= 0 || (N & (N - 1)) !== 0) {
             throw new Error("Window size N must be a strict power of 2 (e.g., 1024, 2048).");
@@ -42,9 +59,9 @@ class RTA {
 
         this.totalBins = this.N / 2;
         this.precomputeBandwidthBins();
+        this.precomputeWeightingGains();
     }
 
-    /** Delegates to internal {@link SPL.calibrate}. */
     calibrate(
         knownSplDb: number,
         options: { weighting?: Weighting; speed?: TimeWeighting } = {}
@@ -64,12 +81,70 @@ class RTA {
         return this.N;
     }
 
+    getHopSamples(): number {
+        return this.hopSamples;
+    }
+
     getFrameDurationSec(): number {
-        return this.N / this.sampleRate;
+        return this.hopSamples / this.sampleRate;
+    }
+
+    getFrameCount(): number {
+        return this.dbfsZFrames.length;
+    }
+
+    getLevelDbfs(frameIndex: number, bandIndex: number, weighting: Weighting): number {
+        const frames =
+            weighting === "A"
+                ? this.dbfsAFrames
+                : weighting === "C"
+                  ? this.dbfsCFrames
+                  : this.dbfsZFrames;
+        return frames[frameIndex]?.[bandIndex] ?? -120;
+    }
+
+    /** Lazily materializes one frame for the RTA bar chart. */
+    getFrame(frameIndex: number): FrequencyBinData[] {
+        const z = this.dbfsZFrames[frameIndex];
+        const a = this.dbfsAFrames[frameIndex];
+        const c = this.dbfsCFrames[frameIndex];
+        if (!z) throw new Error(`Invalid frame index: ${frameIndex}`);
+
+        const offset = this.spl.getCalibrationOffsetDb();
+        const numBands = this.bandFrequencies.length;
+        const frame: FrequencyBinData[] = new Array(numBands);
+
+        for (let b = 0; b < numBands; b++) {
+            const dbfsZ = z[b];
+            const dbfsA = a[b];
+            const dbfsC = c[b];
+            frame[b] = {
+                frequency: this.bandFrequencies[b],
+                dbfs: dbfsZ,
+                dbfsA,
+                dbfsC,
+                splZ: dbfsZ + offset,
+                splA: dbfsA + offset,
+                splC: dbfsC + offset,
+            };
+        }
+
+        return frame;
     }
 
     private nominalCenter(fc: number): number {
         return nominalCenterForBandwidth(fc, this.bandwidth);
+    }
+
+    private precomputeWeightingGains(): void {
+        this.gainA = new Float32Array(this.totalBins);
+        this.gainC = new Float32Array(this.totalBins);
+
+        for (let k = 0; k < this.totalBins; k++) {
+            const frequencyHz = (k * this.sampleRate) / this.N;
+            this.gainA[k] = weightingGainLinear(frequencyHz, "A");
+            this.gainC[k] = weightingGainLinear(frequencyHz, "C");
+        }
     }
 
     private precomputeBandwidthBins(): void {
@@ -112,20 +187,48 @@ class RTA {
                 kEnd: kEnd,
             });
         }
+
+        this.bandFrequencies = Float32Array.from(
+            this.bandLookupTable.map((band) => band.centerFrequency)
+        );
     }
 
-    calculate(channel: number, windowType: "hann" | "hamming" = "hann"): FrequencyBinData[][] {
+    private computeHopSamples(totalSamples: number, maxFrames: number): number {
+        if (totalSamples <= this.N) return this.N;
+        return Math.max(this.N, Math.floor((totalSamples - this.N) / (maxFrames - 1)));
+    }
+
+    private estimateFrameCount(totalSamples: number, hopSamples: number): number {
+        if (totalSamples < this.N) return 0;
+        return Math.floor((totalSamples - this.N) / hopSamples) + 1;
+    }
+
+    async calculate(
+        channel: number,
+        windowType: "hann" | "hamming" = "hann",
+        options: CalculateOptions = {}
+    ): Promise<number> {
         const samples = this.source.channels[channel];
         if (!samples) throw new Error("Invalid channel");
 
+        const maxFrames = options.maxFrames ?? DEFAULT_MAX_FRAMES;
+        const yieldEvery = options.yieldEvery ?? 32;
         const N = this.N;
         const totalSamples = samples.length;
-        const timelineAnalysis: FrequencyBinData[][] = [];
+        const numBands = this.bandLookupTable.length;
+
+        this.hopSamples = this.computeHopSamples(totalSamples, maxFrames);
+        const estimatedFrames = this.estimateFrameCount(totalSamples, this.hopSamples);
+
+        this.dbfsZFrames = [];
+        this.dbfsAFrames = [];
+        this.dbfsCFrames = [];
 
         const fftInstance = new FFT(N);
         const inputSignal = new Float32Array(N);
         const outputComplex = fftInstance.createComplexArray();
         const windowCoefficents = new Float64Array(N);
+        const normDivisor = N / 4;
 
         if (windowType === "hann") {
             for (let n = 0; n < N; n++) {
@@ -141,74 +244,65 @@ class RTA {
             throw new Error("Invalid window type");
         }
 
-        const rawBinDbfsValues = new Float32Array(this.totalBins);
+        let framesDone = 0;
 
-        for (let i = 0; i <= totalSamples - N; i += N) {
+        for (let i = 0; i <= totalSamples - N; i += this.hopSamples) {
             for (let n = 0; n < N; n++) {
                 inputSignal[n] = samples[i + n] * windowCoefficents[n];
             }
 
             fftInstance.realTransform(outputComplex, inputSignal);
 
-            for (let k = 0; k < this.totalBins; k++) {
-                const real = outputComplex[2 * k];
-                const imaginary = outputComplex[2 * k + 1];
+            const bandDbfsZ = new Float32Array(numBands);
+            const bandDbfsA = new Float32Array(numBands);
+            const bandDbfsC = new Float32Array(numBands);
+            bandDbfsZ.fill(-120);
+            bandDbfsA.fill(-120);
+            bandDbfsC.fill(-120);
 
-                const magnitude = Math.sqrt(real ** 2 + imaginary ** 2);
-                const normalizedMagnitude = magnitude / (N / 4);
-
-                rawBinDbfsValues[k] = 20 * Math.log10(normalizedMagnitude + Number.EPSILON);
-            }
-
-            const collapsedBandFrame: FrequencyBinData[] = new Array(this.bandLookupTable.length);
-            for (let b = 0; b < this.bandLookupTable.length; b++) {
+            for (let b = 0; b < numBands; b++) {
                 const band = this.bandLookupTable[b];
 
                 let sumZ = 0;
                 let sumA = 0;
                 let sumC = 0;
-                let binsFound = 0;
 
                 for (let k = band.kStart; k <= band.kEnd; k++) {
-                    const dbfsValue = rawBinDbfsValues[k];
+                    const real = outputComplex[2 * k];
+                    const imaginary = outputComplex[2 * k + 1];
+                    const normalizedMag =
+                        Math.sqrt(real * real + imaginary * imaginary) / normDivisor;
+                    const power = normalizedMag * normalizedMag;
 
-                    if (dbfsValue > -140) {
-                        const power = 10 ** (dbfsValue / 10);
-                        const frequencyHz = (k * this.sampleRate) / N;
-                        const gainA = weightingGainLinear(frequencyHz, "A");
-                        const gainC = weightingGainLinear(frequencyHz, "C");
-
+                    if (power > POWER_FLOOR) {
+                        const gainA = this.gainA[k];
+                        const gainC = this.gainC[k];
                         sumZ += power;
                         sumA += power * gainA * gainA;
                         sumC += power * gainC * gainC;
-                        binsFound++;
                     }
                 }
 
-                let bandDbfsZ = -120;
-                let bandDbfsA = -120;
-                let bandDbfsC = -120;
-
-                if (binsFound > 0 && sumZ > 0) {
-                    bandDbfsZ = 10 * Math.log10(sumZ);
-                    bandDbfsA = 10 * Math.log10(sumA);
-                    bandDbfsC = 10 * Math.log10(sumC);
+                if (sumZ > 0) {
+                    bandDbfsZ[b] = 10 * Math.log10(sumZ);
+                    bandDbfsA[b] = 10 * Math.log10(sumA);
+                    bandDbfsC[b] = 10 * Math.log10(sumC);
                 }
-
-                collapsedBandFrame[b] = {
-                    frequency: band.centerFrequency,
-                    dbfs: parseFloat(bandDbfsZ.toFixed(2)),
-                    dbfsA: parseFloat(bandDbfsA.toFixed(2)),
-                    dbfsC: parseFloat(bandDbfsC.toFixed(2)),
-                    splZ: parseFloat(this.spl.measureFromDbfs(bandDbfsZ).toFixed(2)),
-                    splA: parseFloat(this.spl.measureFromDbfs(bandDbfsA).toFixed(2)),
-                    splC: parseFloat(this.spl.measureFromDbfs(bandDbfsC).toFixed(2)),
-                };
             }
-            timelineAnalysis.push(collapsedBandFrame);
+
+            this.dbfsZFrames.push(bandDbfsZ);
+            this.dbfsAFrames.push(bandDbfsA);
+            this.dbfsCFrames.push(bandDbfsC);
+
+            framesDone++;
+            options.onProgress?.(framesDone, estimatedFrames);
+
+            if (framesDone % yieldEvery === 0) {
+                await new Promise<void>((resolve) => setTimeout(resolve, 0));
+            }
         }
-        this.timelineAnalysis = timelineAnalysis;
-        return timelineAnalysis;
+
+        return framesDone;
     }
 }
 
