@@ -10,7 +10,12 @@
 import Leq from "../audio analysis/Leq";
 import Spectrogram from "../audio analysis/Spectrogram";
 import SPL from "../audio analysis/SPL";
-import { Weighting } from "../audio analysis/dsp";
+import {
+    buildWeightedChannelCache,
+    traceStepMs,
+    WeightedChannelCache,
+    Weighting,
+} from "../audio analysis/dsp";
 import Wav from "../audio analysis/Wav";
 import { ChartPoint, ChartSeries, SplChart } from "./chart";
 import { RtaChart } from "./rtaChart";
@@ -74,6 +79,10 @@ const enabledTraces = new Set<TraceKey>(
 let currentFileName = "";
 let currentWav: Wav | null = null;
 let currentSpectrogram: Spectrogram | null = null;
+let currentSpl: SPL | null = null;
+let currentLeq: Leq | null = null;
+let weightedCache: WeightedChannelCache | null = null;
+let currentTraceStepMs = STEP_MS;
 let rtaHopSamples = RTA_FFT_SIZE;
 let rtaFrameDurationSec = 0;
 let viewMode: ViewMode = "time";
@@ -92,6 +101,78 @@ type AnalysisTimings = {
     tracesMs?: number;
     totalMs?: number;
 };
+
+function traceConfigForKey(key: TraceKey): TraceConfig {
+    const trace = TRACES.find((t) => t.key === key);
+    if (!trace) throw new Error(`Unknown trace: ${key}`);
+    return trace;
+}
+
+function weightingsForTraces(keys: Iterable<TraceKey>): Weighting[] {
+    const set = new Set<Weighting>();
+    for (const key of keys) {
+        set.add(traceConfigForKey(key).weighting);
+    }
+    return [...set];
+}
+
+function ensureWeightedCache(weightings: Iterable<Weighting>): WeightedChannelCache {
+    if (!currentWav) throw new Error("No WAV loaded");
+    const samples = currentWav.channels[0];
+    if (!samples) throw new Error("No channel data");
+
+    if (!weightedCache) {
+        weightedCache = buildWeightedChannelCache(samples, currentWav.sampleRate, weightings);
+        return weightedCache;
+    }
+
+    for (const weighting of weightings) {
+        if (weighting === "Z" || weightedCache[weighting]) continue;
+        weightedCache[weighting] = buildWeightedChannelCache(
+            samples,
+            currentWav.sampleRate,
+            [weighting]
+        )[weighting];
+    }
+
+    return weightedCache;
+}
+
+function computeTracePoints(trace: TraceConfig): ChartPoint[] {
+    if (!currentSpl || !currentLeq) throw new Error("Analysis not ready");
+
+    const cache = ensureWeightedCache([trace.weighting]);
+    const weighted = cache[trace.weighting];
+
+    if (trace.kind === "SPL") {
+        return currentSpl.measureOverTime({
+            weighting: trace.weighting,
+            speed: "FAST",
+            mode: "SPL",
+            stepMs: currentTraceStepMs,
+            weighted,
+        });
+    }
+
+    return currentLeq.measureOverTime({
+        weighting: trace.weighting,
+        speed: "INST",
+        stepMs: currentTraceStepMs,
+        weighted,
+    });
+}
+
+async function ensureTraceComputed(key: TraceKey): Promise<void> {
+    if (traceData.has(key)) return;
+
+    const trace = traceConfigForKey(key);
+    setLoading(true, `Computing ${trace.label}…`);
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+
+    traceData.set(key, computeTracePoints(trace));
+    populateSeriesToggles();
+    setLoading(false);
+}
 
 function formatDurationMs(ms: number): string {
     if (ms < 1000) return `${Math.round(ms)} ms`;
@@ -283,10 +364,14 @@ function populateSeriesToggles(): void {
             if (input.checked) {
                 enabledTraces.add(trace.key);
                 label.classList.add("is-active");
-            } else {
-                enabledTraces.delete(trace.key);
-                label.classList.remove("is-active");
+                void ensureTraceComputed(trace.key).then(() => {
+                    renderActiveView(getPlaybackTimeSec());
+                });
+                return;
             }
+
+            enabledTraces.delete(trace.key);
+            label.classList.remove("is-active");
             renderActiveView(getPlaybackTimeSec());
         });
 
@@ -398,6 +483,9 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
     stopPlayback();
     traceData.clear();
     currentSpectrogram = null;
+    currentSpl = null;
+    currentLeq = null;
+    weightedCache = null;
     currentWav = wav;
     currentFileName = fileName;
     playbackOffsetSec = 0;
@@ -422,10 +510,19 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
 
         const spl = new SPL(wav);
         spl.calibrate(94, { weighting: "Z", speed: "INST" });
+        currentSpl = spl;
 
         const leq = new Leq(wav);
         leq.setTotalMeasurementTime(Math.ceil(wav.duration));
         leq.calibrate(94, { weighting: "Z", speed: "INST" });
+        currentLeq = leq;
+
+        currentTraceStepMs = traceStepMs(wav.duration, STEP_MS);
+        weightedCache = buildWeightedChannelCache(
+            wav.channels[0]!,
+            wav.sampleRate,
+            weightingsForTraces(enabledTraces)
+        );
 
         renderMeta(wav, spl, leq, spectrogram.getFrameCount(), { rtaMs });
 
@@ -436,28 +533,10 @@ async function analyzeWav(wav: Wav, fileName: string): Promise<void> {
         setLoading(true, "Computing level traces…");
 
         const tracesStart = performance.now();
-        for (const trace of TRACES) {
-            if (trace.kind === "SPL") {
-                traceData.set(
-                    trace.key,
-                    spl.measureOverTime({
-                        weighting: trace.weighting,
-                        speed: "FAST",
-                        mode: "SPL",
-                        stepMs: STEP_MS,
-                    })
-                );
-            } else {
-                traceData.set(
-                    trace.key,
-                    leq.measureOverTime({
-                        weighting: trace.weighting,
-                        speed: "INST",
-                        stepMs: STEP_MS,
-                    })
-                );
-            }
+        const tracesToCompute = TRACES.filter((trace) => enabledTraces.has(trace.key));
 
+        for (const trace of tracesToCompute) {
+            traceData.set(trace.key, computeTracePoints(trace));
             await new Promise<void>((resolve) => setTimeout(resolve, 0));
         }
         const tracesMs = performance.now() - tracesStart;

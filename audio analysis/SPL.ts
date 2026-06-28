@@ -1,9 +1,6 @@
 /**
  * Sound pressure level (SPL) measurement from decoded WAV data.
  *
- * Pipeline: frequency weighting → time weighting → RMS → dBFS → optional
- * calibration offset → SPL in dB.
- *
  * @module SPL
  */
 
@@ -17,33 +14,31 @@ import {
     Weighting,
 } from "./dsp";
 
-/** Options for {@link SPL.measure} and {@link SPL.levelDb}. */
 export type MeasureOptions = {
-    /** Audio channel index (default 0). */
     channel?: number;
-    /** First sample index (inclusive). */
     startSample?: number;
-    /** Last sample index (exclusive). */
     endSample?: number;
-    /** Z (flat), A, or C frequency weighting. */
     weighting?: Weighting;
-    /** FAST, SLOW, or INST time weighting. */
     speed?: TimeWeighting;
-    /** `SPL` adds calibration; `dBFS` returns digital level only. */
     mode?: LevelMode;
 };
 
+export type MeasureOverTimeOptions = {
+    channel?: number;
+    weighting?: Weighting;
+    speed?: TimeWeighting;
+    mode?: LevelMode;
+    stepMs?: number;
+    /** Pre-weighted channel from {@link buildWeightedChannelCache}. */
+    weighted?: Float32Array;
+};
+
 class SPL {
-    /**
-     * @param wav - Loaded audio to measure.
-     * @param calibrationOffsetDb - Added to dBFS to produce SPL (default 0).
-     */
     constructor(
         private wav: Wav,
         private calibrationOffsetDb: number = 0
     ) {}
 
-    /** Uncalibrated level in dBFS after weighting and time weighting. */
     levelDb(options: MeasureOptions = {}): number {
         const {
             channel = 0,
@@ -70,33 +65,18 @@ class SPL {
         return dbFromRatio(rmsValue);
     }
 
-    /**
-     * Returns SPL or dBFS for the selected window and weighting.
-     * Default mode is `SPL` (includes calibration offset).
-     */
     measure(options: MeasureOptions = {}): number {
         const { mode = "SPL" } = options;
         const db = this.levelDb(options);
-
-        if (mode === "dBFS") {
-            return db;
-        }
-
+        if (mode === "dBFS") return db;
         return db + this.calibrationOffsetDb;
     }
 
-    /** Applies calibration offset to an already-computed dBFS value (no re-measurement). */
     measureFromDbfs(dbfs: number, mode: LevelMode = "SPL"): number {
-        if (mode === "dBFS") {
-            return dbfs;
-        }
+        if (mode === "dBFS") return dbfs;
         return dbfs + this.calibrationOffsetDb;
     }
 
-    /**
-     * Sets calibration so the current window reads `knownSplDb`.
-     * Use the same weighting and speed as subsequent measurements.
-     */
     calibrate(knownSplDb: number, options: Omit<MeasureOptions, "mode"> = {}): number {
         const db = this.levelDb(options);
         this.calibrationOffsetDb = knownSplDb - db;
@@ -111,48 +91,56 @@ class SPL {
         this.calibrationOffsetDb = offsetDb;
     }
 
-    /**
-     * Level at increasing time points from the start of the file.
-     * FAST/SLOW produce meter-style exponential buildup from t = 0.
-     */
-    measureOverTime(
-        options: {
-            channel?: number;
-            weighting?: Weighting;
-            speed?: TimeWeighting;
-            mode?: LevelMode;
-            stepMs?: number;
-        } = {}
-    ): { timeSec: number; levelDb: number }[] {
+    measureOverTime(options: MeasureOverTimeOptions = {}): { timeSec: number; levelDb: number }[] {
         const {
             channel = 0,
             weighting = "Z",
             speed = "FAST",
             mode = "SPL",
             stepMs = 50,
+            weighted: weightedInput,
         } = options;
 
         const samples = this.wav.channels[channel];
         if (!samples) throw new Error("Invalid channel");
 
-        const stepSamples = Math.max(
-            1,
-            Math.floor((this.wav.sampleRate * stepMs) / 1000)
-        );
+        const sampleRate = this.wav.sampleRate;
+        const stepSamples = Math.max(1, Math.floor((sampleRate * stepMs) / 1000));
+        const offset = mode === "SPL" ? this.calibrationOffsetDb : 0;
+
+        const weighted =
+            weightedInput ??
+            (weighting === "Z" ? samples : applyWeighting(samples, weighting, sampleRate));
 
         const results: { timeSec: number; levelDb: number }[] = [];
 
-        for (let end = stepSamples; end <= samples.length; end += stepSamples) {
+        if (speed === "INST") {
+            let sumSq = 0;
+            for (let i = 0; i < samples.length; i++) {
+                const sample = weighted[i];
+                sumSq += sample * sample;
+                const end = i + 1;
+                if (end % stepSamples !== 0) continue;
+                results.push({
+                    timeSec: end / sampleRate,
+                    levelDb: dbFromRatio(Math.sqrt(sumSq / end)) + offset,
+                });
+            }
+            return results;
+        }
+
+        const tau = speed === "FAST" ? 0.125 : 1.0;
+        const decay = Math.exp(-1 / (tau * sampleRate));
+        let meanSquare = weighted[0] * weighted[0];
+
+        for (let i = 1; i < samples.length; i++) {
+            const squared = weighted[i] * weighted[i];
+            meanSquare = decay * meanSquare + (1 - decay) * squared;
+            const end = i + 1;
+            if (end % stepSamples !== 0) continue;
             results.push({
-                timeSec: end / this.wav.sampleRate,
-                levelDb: this.measure({
-                    channel,
-                    startSample: 0,
-                    endSample: end,
-                    weighting,
-                    speed,
-                    mode,
-                }),
+                timeSec: end / sampleRate,
+                levelDb: dbFromRatio(Math.sqrt(meanSquare)) + offset,
             });
         }
 
