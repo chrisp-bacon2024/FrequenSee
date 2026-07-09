@@ -30,10 +30,9 @@ body {
 
 .header {
     display: flex;
-    flex-wrap: wrap;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 1.5rem;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 1.25rem;
     margin-bottom: 1.5rem;
 }
 
@@ -52,6 +51,8 @@ h1 {
 .controls {
     display: flex;
     flex-wrap: wrap;
+    justify-content: flex-start;
+    align-items: flex-end;
     gap: 1rem;
 }
 
@@ -76,6 +77,26 @@ h1 {
     font-size: 0.95rem;
 }
 
+.control[hidden] {
+    display: none;
+}
+
+.control.rta-only select {
+    min-width: 0;
+}
+
+#rta-weighting-select {
+    width: 4.5rem;
+}
+
+#rta-bandwidth-select {
+    width: 7.5rem;
+}
+
+#rta-averaging-select {
+    width: 9.5rem;
+}
+
 .series-bar {
     display: flex;
     flex-wrap: wrap;
@@ -84,6 +105,10 @@ h1 {
     margin-bottom: 1rem;
     padding-bottom: 1rem;
     border-bottom: 1px solid var(--border);
+}
+
+.series-bar[hidden] {
+    display: none;
 }
 
 .series-bar-label {

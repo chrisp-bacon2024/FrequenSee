@@ -315,6 +315,7 @@ function setViewMode(mode: ViewMode): void {
     viewMode = mode;
     const isRta = mode === "rta";
 
+    viewSelect.value = mode;
     chartCanvas.hidden = isRta;
     rtaStack.hidden = !isRta;
     timeSeriesBar.hidden = isRta;
