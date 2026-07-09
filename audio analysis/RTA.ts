@@ -42,6 +42,7 @@ class RTA {
     private gainA: Float32Array = new Float32Array(0);
     private gainC: Float32Array = new Float32Array(0);
     private hopSamples: number = 2048;
+    private averagingDepth: number = 1;
 
     bandFrequencies: Float32Array = new Float32Array(0);
     private dbfsZFrames: Float32Array[] = [];
@@ -77,6 +78,17 @@ class RTA {
         this.spl.setCalibrationOffsetDb(offsetDb);
     }
 
+    getAveragingDepth(): number {
+        return this.averagingDepth;
+    }
+
+    setAveragingDepth(depth: number): void {
+        if (depth <= 0 || (depth & (depth - 1)) !== 0 || depth > 16) {
+            throw new Error("Averaging depth must be a strict power of 2 greater than 0 and no more than 16.");
+        }
+        this.averagingDepth = depth;
+    }
+
     getFftSize(): number {
         return this.N;
     }
@@ -94,30 +106,20 @@ class RTA {
     }
 
     getLevelDbfs(frameIndex: number, bandIndex: number, weighting: Weighting): number {
-        const frames =
-            weighting === "A"
-                ? this.dbfsAFrames
-                : weighting === "C"
-                  ? this.dbfsCFrames
-                  : this.dbfsZFrames;
-        return frames[frameIndex]?.[bandIndex] ?? -120;
+        if (!this.dbfsZFrames[frameIndex]) return -120;
+        return this.averageBandPower(frameIndex, bandIndex, weighting);
     }
 
     /** Lazily materializes one frame for the RTA bar chart. */
     getFrame(frameIndex: number): FrequencyBinData[] {
-        const z = this.dbfsZFrames[frameIndex];
-        const a = this.dbfsAFrames[frameIndex];
-        const c = this.dbfsCFrames[frameIndex];
-        if (!z) throw new Error(`Invalid frame index: ${frameIndex}`);
-
         const offset = this.spl.getCalibrationOffsetDb();
         const numBands = this.bandFrequencies.length;
         const frame: FrequencyBinData[] = new Array(numBands);
 
         for (let b = 0; b < numBands; b++) {
-            const dbfsZ = z[b];
-            const dbfsA = a[b];
-            const dbfsC = c[b];
+            const dbfsZ = this.averageBandPower(frameIndex, b, "Z");
+            const dbfsA = this.averageBandPower(frameIndex, b, "A");
+            const dbfsC = this.averageBandPower(frameIndex, b, "C");
             frame[b] = {
                 frequency: this.bandFrequencies[b],
                 dbfs: dbfsZ,
@@ -201,6 +203,28 @@ class RTA {
     private estimateFrameCount(totalSamples: number, hopSamples: number): number {
         if (totalSamples < this.N) return 0;
         return Math.floor((totalSamples - this.N) / hopSamples) + 1;
+    }
+
+    private averageBandPower(frameIndex: number, bandIndex: number, weighting: Weighting): number {
+        const frameData = 
+            weighting === "A"
+                ? this.dbfsAFrames
+                : weighting === "C"
+                  ? this.dbfsCFrames
+                  : this.dbfsZFrames;
+        const avgDepth = this.averagingDepth;
+        const start = Math.max(0, frameIndex - avgDepth + 1);
+        let sumPower = 0;
+        let count = 0;
+        for (let f = start; f <= frameIndex; f++) {
+            const dB = frameData[f][bandIndex];
+            if (dB <= -119) continue;
+            sumPower += 10 ** (dB / 10);
+            count++;
+        }
+        const avgPower = count > 0 ? sumPower / count : 0;
+        const avgDb = avgPower > 0 ? 10 * Math.log10(avgPower) : -120;
+        return avgDb;
     }
 
     async calculate(
