@@ -44,7 +44,7 @@ const TRACES: TraceConfig[] = [
 ];
 
 const STEP_MS = 100;
-const DEFAULT_WAV = "/test_1kHz.wav";
+const DEFAULT_WAV = `${import.meta.env.BASE_URL}test_1kHz.wav`;
 const RTA_FFT_SIZE = 2048;
 
 const fileInput = document.getElementById("file-input") as HTMLInputElement;
